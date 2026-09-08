@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "wavesurf",
+  "productName": "Wavesurf",
   "version": "0.1.0",
   "identifier": "com.hoss.wavesurf",
   "build": {
@@ -12,13 +12,19 @@
   "app": {
     "windows": [
       {
-        "title": "wavesurf",
-        "width": 800,
-        "height": 600
+        "label": "main",
+        "title": "Wavesurf",
+        "width": 380,
+        "height": 560,
+        "minWidth": 320,
+        "minHeight": 480,
+        "resizable": true,
+        "decorations": false,
+        "transparent": false
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://i.ytimg.com; connect-src ipc: http://ipc.localhost; media-src 'self'"
     }
   },
   "bundle": {
