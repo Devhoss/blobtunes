@@ -262,7 +262,7 @@ impl SearchClient {
     }
 }
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     // minimal percent-encoding, enough for query strings
     let mut out = String::new();
     for b in s.bytes() {
