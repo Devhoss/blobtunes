@@ -10,7 +10,11 @@ fn main() {
     // this machine has no MSVC link.exe) accepts it when presented as mpv.lib.
     // `tools/fetch-mpv.ps1` + `tools/copy-dll.sh` produce these artifacts.
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let mpv_dir = manifest.join("..").join("tools").join("mpv").join("extracted");
+    let mpv_dir = manifest
+        .join("..")
+        .join("tools")
+        .join("mpv")
+        .join("extracted");
     if mpv_dir.join("mpv.lib").exists() {
         println!(
             "cargo:rustc-link-search=native={}",

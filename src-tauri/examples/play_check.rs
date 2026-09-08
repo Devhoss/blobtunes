@@ -8,7 +8,6 @@
 //!   (possibly via "tier 2" after a primary 403 — that IS the design working)
 //! Expected LIVE: `CONFIRMED LIVE` with no finite duration.
 
-use libmpv2::events::Event;
 use wavesurf_lib::ytdlp;
 
 fn main() {
@@ -36,7 +35,11 @@ fn main() {
     .expect("mpv init");
     mpv.enable_all_events().unwrap();
     mpv.disable_deprecated_events().unwrap();
-    let mut fallback = if t.is_hls { None } else { t.fallback_url.clone() };
+    let mut fallback = if t.is_hls {
+        None
+    } else {
+        t.fallback_url.clone()
+    };
     println!("loading tier 1");
     mpv.command("loadfile", &[t.primary_url.as_str(), "replace"])
         .unwrap();

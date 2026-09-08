@@ -179,8 +179,7 @@ pub fn resolve_stream(url: &str) -> Result<ResolvedTrack> {
     let (def, and) = std::thread::scope(|s| {
         let exe2 = exe.clone();
         let url2 = url_owned.clone();
-        let h_default =
-            s.spawn(move || run_dump(&exe, &["-f", "bestaudio/best"], &url_owned));
+        let h_default = s.spawn(move || run_dump(&exe, &["-f", "bestaudio/best"], &url_owned));
         let h_android = s.spawn(move || {
             run_dump(
                 &exe2,
@@ -305,7 +304,10 @@ mod tests {
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
             .map(|(_, u)| u)
             .unwrap();
-        assert!(primary.contains("dash-m4a"), "want highest-abr dash, got {primary}");
+        assert!(
+            primary.contains("dash-m4a"),
+            "want highest-abr dash, got {primary}"
+        );
     }
 
     #[test]
@@ -363,7 +365,13 @@ mod tests {
         assert!(!r.is_hls);
         assert!(r.primary_url.starts_with("https://"));
         println!("primary: {}…", &r.primary_url[..60]);
-        println!("fallback: {:?}", r.fallback_url.as_deref().map(|u| &u[..60]));
-        assert!(r.fallback_url.is_some(), "expected android progressive fallback");
+        println!(
+            "fallback: {:?}",
+            r.fallback_url.as_deref().map(|u| &u[..60])
+        );
+        assert!(
+            r.fallback_url.is_some(),
+            "expected android progressive fallback"
+        );
     }
 }

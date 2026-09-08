@@ -146,7 +146,11 @@ pub fn merge_durations(mut items: Vec<SearchItem>, videos_json: &str) -> Result<
     let vids: ApiVideos = serde_json::from_str(videos_json).context("bad videos response")?;
     let mut by_id: HashMap<String, Option<f64>> = HashMap::new();
     for v in vids.items {
-        let dur = v.content_details.duration.as_deref().and_then(parse_iso8601);
+        let dur = v
+            .content_details
+            .duration
+            .as_deref()
+            .and_then(parse_iso8601);
         by_id.insert(v.id, dur);
     }
     for i in items.iter_mut() {

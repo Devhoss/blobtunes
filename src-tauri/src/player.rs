@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter};
 pub struct PlayerState {
     pub playing: bool, // a source is loaded
     pub paused: bool,
-    pub loading: bool, // resolving/buffering (StartFile->FileLoaded)
+    pub loading: bool,         // resolving/buffering (StartFile->FileLoaded)
     pub position: Option<f64>, // seconds; None until known
     pub duration: Option<f64>, // None = unknown or LIVE (never guess)
     pub seekable: bool,
@@ -58,7 +58,9 @@ impl Player {
         })
     }
     pub fn send(&self, cmd: PlayerCmd) -> Result<()> {
-        self.tx.send(cmd).map_err(|_| anyhow!("player core is down"))
+        self.tx
+            .send(cmd)
+            .map_err(|_| anyhow!("player core is down"))
     }
     /// Graceful teardown: ask the owner thread to exit (dropping Mpv there),
     /// then join it. Called from the tray Quit path before `app.exit(0)`.
@@ -77,10 +79,10 @@ fn build_mpv() -> Result<Mpv> {
         init.set_option("audio-display", "no")?;
         init.set_option("ytdl", "yes")?; // fallback only; our loads are pre-resolved
         init.set_option("ytdl-format", "bestaudio/best")?; // audio-first; libmpv decodes anything
-        // Harmless Chrome UA for any direct googlevideo fetch mpv still does
-        // (e.g. HLS segments). NOTE: the VOD 403s were NOT a UA problem — they
-        // were range-gated edges rejecting ffmpeg's open-ended ranges; the fix
-        // is tiered URLs (dash primary, progressive fallback), not headers.
+                                                           // Harmless Chrome UA for any direct googlevideo fetch mpv still does
+                                                           // (e.g. HLS segments). NOTE: the VOD 403s were NOT a UA problem — they
+                                                           // were range-gated edges rejecting ffmpeg's open-ended ranges; the fix
+                                                           // is tiered URLs (dash primary, progressive fallback), not headers.
         init.set_option("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")?;
         Ok(())
     })?;
@@ -227,72 +229,76 @@ fn run_core(
                 Ok(ev) => {
                     let mut st = state.lock().unwrap();
                     match ev {
-                Event::StartFile => {
-                    st.loading = true;
-                    st.playing = true;
-                    st.error = None;
-                    st.ended = false;
-                    st.position = None;
-                    st.duration = None;
-                }
-                Event::FileLoaded => {
-                    st.loading = false;
-                    st.paused = false;
-                    if let Ok(title) = mpv.get_property::<String>("media-title") {
-                        st.title = Some(title);
-                    }
-                }
-                Event::EndFile(reason) => {
-                    if reason == mpv_end_file_reason::Eof {
-                        st.ended = true; // frontend advances queue on this
-                        st.playing = false;
-                        fallback = None;
-                    } else {
-                        // Commanded stop/quit/redirect: clear playback, never set `ended`.
-                        st.playing = false;
-                        st.loading = false;
-                        if reason == mpv_end_file_reason::Error {
-                            // Tier-2 retry, once: if the primary (dash) URL was
-                            // rejected (e.g. range-gated edge 403), fall back to
-                            // the progressive URL. Otherwise surface the error.
-                            if let Some(url) = fallback.take() {
-                                st.error = None;
-                                st.loading = true;
-                                st.playing = true;
-                                if mpv.command("loadfile", &[url.as_str(), "replace"]).is_err() {
-                                    st.loading = false;
-                                    st.playing = false;
-                                    st.error = Some("mpv playback error".into());
-                                }
-                            } else {
-                                st.error = Some("mpv playback error".into());
+                        Event::StartFile => {
+                            st.loading = true;
+                            st.playing = true;
+                            st.error = None;
+                            st.ended = false;
+                            st.position = None;
+                            st.duration = None;
+                        }
+                        Event::FileLoaded => {
+                            st.loading = false;
+                            st.paused = false;
+                            if let Ok(title) = mpv.get_property::<String>("media-title") {
+                                st.title = Some(title);
                             }
                         }
-                    }
-                }
-                Event::PropertyChange {
-                    change, reply_userdata, ..
-                } => match reply_userdata {
-                    1 => st.position = as_opt_f64(&change), // time-pos
-                    2 => {
-                        let d = as_opt_f64(&change).filter(|d| *d > 0.5);
-                        // HLS live reports a GROWING duration window (15s, 20s…)
-                        // while never becoming seekable — a bare ">0.5 ⟹ VOD"
-                        // check would show fake totals on live streams.
-                        // live ⟺ never seekable AND position advanced past 2s
-                        // (rules out VODs still buffering, where pos == 0).
-                        // Direct VOD streams report seekable from stream open.
-                        let live = !st.seekable
-                            && st.position.unwrap_or(0.0) > 2.0
-                            && d.is_some();
-                        st.duration = if live { None } else { d };
-                    }
-                    3 => st.paused = matches!(change, PropertyData::Flag(true)),
-                    4 => st.seekable = matches!(change, PropertyData::Flag(true)),
-                    5 => {} // core-idle: covered by FileLoaded/Idle events
-                    _ => {}
-                },
-                _ => {}
+                        Event::EndFile(reason) => {
+                            if reason == mpv_end_file_reason::Eof {
+                                st.ended = true; // frontend advances queue on this
+                                st.playing = false;
+                                fallback = None;
+                            } else {
+                                // Commanded stop/quit/redirect: clear playback, never set `ended`.
+                                st.playing = false;
+                                st.loading = false;
+                                if reason == mpv_end_file_reason::Error {
+                                    // Tier-2 retry, once: if the primary (dash) URL was
+                                    // rejected (e.g. range-gated edge 403), fall back to
+                                    // the progressive URL. Otherwise surface the error.
+                                    if let Some(url) = fallback.take() {
+                                        st.error = None;
+                                        st.loading = true;
+                                        st.playing = true;
+                                        if mpv
+                                            .command("loadfile", &[url.as_str(), "replace"])
+                                            .is_err()
+                                        {
+                                            st.loading = false;
+                                            st.playing = false;
+                                            st.error = Some("mpv playback error".into());
+                                        }
+                                    } else {
+                                        st.error = Some("mpv playback error".into());
+                                    }
+                                }
+                            }
+                        }
+                        Event::PropertyChange {
+                            change,
+                            reply_userdata,
+                            ..
+                        } => match reply_userdata {
+                            1 => st.position = as_opt_f64(&change), // time-pos
+                            2 => {
+                                let d = as_opt_f64(&change).filter(|d| *d > 0.5);
+                                // HLS live reports a GROWING duration window (15s, 20s…)
+                                // while never becoming seekable — a bare ">0.5 ⟹ VOD"
+                                // check would show fake totals on live streams.
+                                // live ⟺ never seekable AND position advanced past 2s
+                                // (rules out VODs still buffering, where pos == 0).
+                                // Direct VOD streams report seekable from stream open.
+                                let live =
+                                    !st.seekable && st.position.unwrap_or(0.0) > 2.0 && d.is_some();
+                                st.duration = if live { None } else { d };
+                            }
+                            3 => st.paused = matches!(change, PropertyData::Flag(true)),
+                            4 => st.seekable = matches!(change, PropertyData::Flag(true)),
+                            5 => {} // core-idle: covered by FileLoaded/Idle events
+                            _ => {}
+                        },
+                        _ => {}
                     } // close match ev
                 } // close Ok(ev) arm
             } // close match evt

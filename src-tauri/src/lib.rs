@@ -29,7 +29,8 @@ fn player_seek(p: tauri::State<Player>, seconds: f64) -> Result<(), String> {
 }
 #[tauri::command]
 fn player_set_volume(p: tauri::State<Player>, volume: u8) -> Result<(), String> {
-    p.send(PlayerCmd::SetVolume(volume)).map_err(|e| e.to_string())
+    p.send(PlayerCmd::SetVolume(volume))
+        .map_err(|e| e.to_string())
 }
 #[tauri::command]
 fn player_get_state(p: tauri::State<Player>) -> PlayerState {
@@ -85,7 +86,7 @@ pub fn run() {
             tray::setup(app)?;
             Ok(())
         })
-        .on_window_event(|w, e| tray::intercept_close(w, e))
+        .on_window_event(tray::intercept_close)
         .invoke_handler(tauri::generate_handler![
             player_load,
             player_play,
