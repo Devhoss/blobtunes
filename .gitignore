@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# wavesurf: mpv dev artifacts + bundled dll (never commit binaries)
+tools/mpv/
+src-tauri/bin/
