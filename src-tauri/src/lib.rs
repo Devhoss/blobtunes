@@ -34,7 +34,7 @@ fn player_set_volume(p: tauri::State<Player>, volume: u8) -> Result<(), String> 
 }
 #[tauri::command]
 fn player_get_state(p: tauri::State<Player>) -> PlayerState {
-    p.state.lock().unwrap().clone()
+    p.state.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 #[tauri::command]
 fn player_shutdown(p: tauri::State<Player>) {

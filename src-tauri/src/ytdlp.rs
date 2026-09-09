@@ -113,12 +113,55 @@ pub fn find_yt_dlp() -> Result<String> {
 }
 
 fn run_dump(exe: &str, extra: &[&str], url: &str) -> Result<String> {
-    let out = std::process::Command::new(exe)
-        .args(["--no-playlist", "--dump-json"])
+    use std::process::Stdio;
+    use std::time::Duration;
+    use wait_timeout::ChildExt;
+    let mut child = std::process::Command::new(exe)
+        .args([
+            "--no-playlist",
+            "--dump-json",
+            "--no-warnings",
+            "--socket-timeout",
+            "10",
+        ])
         .args(extra)
         .args(["--", url])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| anyhow!("failed to run yt-dlp ({e})"))?;
+    // Drain both pipes concurrently: waiting before reading can deadlock when
+    // yt-dlp fills stderr/stdout while the parent is blocked in wait.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf)
+            .map(|_| buf)
+            .unwrap_or_default()
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stderr), &mut buf)
+            .map(|_| buf)
+            .unwrap_or_default()
+    });
+    let status = child
+        .wait_timeout(Duration::from_secs(45))
+        .map_err(|e| anyhow!("yt-dlp wait failed ({e})"))?;
+    if status.is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = out_thread.join();
+        let _ = err_thread.join();
+        return Err(anyhow!("yt-dlp timed out after 45 seconds"));
+    }
+    let status = status.unwrap();
+    let out = std::process::Output {
+        status,
+        stdout: out_thread.join().unwrap_or_default(),
+        stderr: err_thread.join().unwrap_or_default(),
+    };
     if !out.status.success() {
         return Err(anyhow!(
             "yt-dlp: {}",
@@ -170,33 +213,16 @@ fn http_url(f: &DlpFormat) -> Option<&str> {
         .filter(|_| f.protocol.as_deref().unwrap_or("") == "https")
 }
 
-/// Full resolve for playback: metadata + tiered stream URLs.
-/// Runs the default-client and android-client dumps CONCURRENTLY (~12s wall).
+/// Full resolve for playback: metadata + primary stream URL.
+/// VOD costs one fast default-client dump (~6-8s); the tier-2 progressive
+/// fallback resolves lazily (reactively, on the first 403) via
+/// `resolve_fallback_url`. Live costs a second android-client dump for the
+/// HLS URL (see the live branch below for why the default one is unusable).
 /// Blocking — NEVER call on the mpv owner thread.
 pub fn resolve_stream(url: &str) -> Result<ResolvedTrack> {
     let exe = find_yt_dlp()?;
-    let url_owned = url.to_string();
-    let (def, and) = std::thread::scope(|s| {
-        let exe2 = exe.clone();
-        let url2 = url_owned.clone();
-        let h_default = s.spawn(move || run_dump(&exe, &["-f", "bestaudio/best"], &url_owned));
-        let h_android = s.spawn(move || {
-            run_dump(
-                &exe2,
-                &[
-                    "--extractor-args",
-                    "youtube:player_client=android",
-                    "-f",
-                    "best[acodec!=none][vcodec!=none]/best",
-                ],
-                &url2,
-            )
-        });
-        (h_default.join().unwrap(), h_android.join().unwrap())
-    });
-    let def_json = def?;
-    let d: DlpDump =
-        serde_json::from_str(def_json.trim()).context("default dump not valid JSON")?;
+    let json = run_dump(&exe, &["-f", "bestaudio/best"], url)?;
+    let d: DlpDump = serde_json::from_str(json.trim()).context("default dump not valid JSON")?;
     let meta = TrackMeta {
         id: d.id.clone(),
         title: d.title.clone(),
@@ -206,22 +232,33 @@ pub fn resolve_stream(url: &str) -> Result<ResolvedTrack> {
         thumbnail: d.thumbnail.clone(),
     };
 
-    // Live: first HLS URL from the default dump plays natively.
+    // Live playback must remain on the critical path of a single extraction.
+    // A second client extraction adds 10–20 seconds to startup and every
+    // reconnect. The URL from the primary dump is a valid native HLS stream;
+    // reconnects can obtain a fresh URL through resolve_live_hls when needed.
     if meta.is_live {
-        if let Some(u) = d
-            .formats
-            .iter()
-            .filter(|f| f.protocol.as_deref().unwrap_or("").contains("m3u8"))
-            .find_map(http_url_allow_m3u8)
-        {
+        // Web playlists frequently contain ad splice dateranges that wedge
+        // mpv's HLS demuxer. Use one Android-client playlist for playback;
+        // metadata is still obtained from the initial probe above.
+        if let Ok(android) = android_dump(&exe, url) {
+            if let Some(u) = pick_hls_url(&android.formats) {
+                return Ok(ResolvedTrack {
+                    meta,
+                    primary_url: u,
+                    fallback_url: None,
+                    is_hls: true,
+                });
+            }
+        }
+        if let Some(u) = pick_hls_url(&d.formats) {
             return Ok(ResolvedTrack {
                 meta,
-                primary_url: u.to_string(),
+                primary_url: u,
                 fallback_url: None,
                 is_hls: true,
             });
         }
-        // is_live but no m3u8 in dump: fall through to VOD tiering rather
+        // is_live but no m3u8 anywhere: fall through to VOD tiering rather
         // than failing — mpv will surface the real outcome.
     }
 
@@ -235,32 +272,85 @@ pub fn resolve_stream(url: &str) -> Result<ResolvedTrack> {
         .map(|(_, u)| u.to_string())
         .ok_or_else(|| anyhow!("yt-dlp returned no audio-only https format"))?;
 
-    // VOD tier 2: progressive MP4 from the android dump (range-clean edges).
-    // The android call failing must NOT fail the whole resolve — dash alone
-    // works on normal networks.
-    let fallback = and
-        .ok()
-        .and_then(|j| serde_json::from_str::<DlpDump>(j.trim()).ok())
-        .and_then(|a| {
-            a.formats
-                .iter()
-                .filter(|f| is_progressive(f) && f.protocol.as_deref().unwrap_or("") == "https")
-                .filter_map(|f| http_url(f).map(|u| (f.height.unwrap_or(u64::MAX), u)))
-                .min_by_key(|(h, _)| *h)
-                .map(|(_, u)| u.to_string())
-        });
-
     Ok(ResolvedTrack {
         meta,
         primary_url: primary,
-        fallback_url: fallback,
+        fallback_url: None, // lazy: resolved reactively by resolve_fallback_url on first 403
         is_hls: false,
+    })
+}
+
+/// Android-client dump, parsed. Used for live HLS (ad-free playlists) and
+/// the VOD tier-2 fallback — one shared code path so each call site pays
+/// for the slower android extraction only when it needs it.
+fn android_dump(exe: &str, url: &str) -> Result<DlpDump> {
+    let json = run_dump(
+        exe,
+        &[
+            "--extractor-args",
+            "youtube:player_client=android",
+            "-f",
+            "best[acodec!=none][vcodec!=none]/best",
+        ],
+        url,
+    )?;
+    serde_json::from_str(json.trim()).context("android dump not valid JSON")
+}
+
+/// Resolve just the tier-2 progressive fallback URL from the android client.
+/// Used reactively — only on the first 403 for a VOD track — not eagerly
+/// on every load, so the common case never pays for android extraction.
+pub fn resolve_fallback_url(url: &str) -> Result<Option<String>> {
+    let exe = find_yt_dlp()?;
+    let d = android_dump(&exe, url)?;
+    let fallback = d
+        .formats
+        .iter()
+        .filter(|f| is_progressive(f) && f.protocol.as_deref().unwrap_or("") == "https")
+        .filter_map(|f| http_url(f).map(|u| (f.height.unwrap_or(u64::MAX), u)))
+        .min_by_key(|(h, _)| *h)
+        .map(|(_, u)| u.to_string());
+    Ok(fallback)
+}
+
+/// Android-only live HLS resolve: fresh playlist URL without the default
+/// dump. Used for watchdog reconnects, where metadata is already known
+/// (the empty-title guard in player.rs keeps the old title) and only a new
+/// URL is needed — roughly halves reconnect reload time. If this fails, the
+/// caller degrades to a full `resolve_stream` via the normal retry path.
+/// Blocking — NEVER call on the mpv owner thread.
+pub fn resolve_live_hls(url: &str) -> Result<ResolvedTrack> {
+    let exe = find_yt_dlp()?;
+    let d = android_dump(&exe, url)?;
+    let primary =
+        pick_hls_url(&d.formats).ok_or_else(|| anyhow!("android dump has no HLS format"))?;
+    Ok(ResolvedTrack {
+        meta: TrackMeta {
+            id: String::new(),
+            title: String::new(),
+            channel: String::new(),
+            duration: None,
+            is_live: true,
+            thumbnail: None,
+        },
+        primary_url: primary,
+        fallback_url: None,
+        is_hls: true,
     })
 }
 
 /// m3u8 URLs are playlist fetches, not ranged media — accept any http(s) URL.
 fn http_url_allow_m3u8(f: &DlpFormat) -> Option<&str> {
     f.url.as_deref().filter(|u| u.starts_with("http"))
+}
+
+/// First HLS (m3u8) URL in a format list, if any.
+fn pick_hls_url(formats: &[DlpFormat]) -> Option<String> {
+    formats
+        .iter()
+        .filter(|f| f.protocol.as_deref().unwrap_or("").contains("m3u8"))
+        .find_map(http_url_allow_m3u8)
+        .map(|u| u.to_string())
 }
 
 #[cfg(test)]
@@ -328,12 +418,38 @@ mod tests {
         let (meta, formats) = parse_default(LIVE_DUMP).unwrap();
         assert!(meta.is_live);
         assert_eq!(meta.duration, None);
-        let hls = formats
-            .iter()
-            .filter(|f| f.protocol.as_deref().unwrap_or("").contains("m3u8"))
-            .find_map(http_url_allow_m3u8)
-            .unwrap();
+        let hls = pick_hls_url(&formats).unwrap();
         assert!(hls.ends_with(".m3u8"));
+    }
+
+    #[test]
+    fn pick_hls_url_skips_non_m3u8_entries() {
+        // A mixed list: the https progressive entry must not shadow the HLS one.
+        let formats = vec![
+            DlpFormat {
+                url: Some("https://rr5.googlevideo.com/v?prog".into()),
+                protocol: Some("https".into()),
+                vcodec: Some("avc1".into()),
+                acodec: Some("mp4a.40.2".into()),
+                abr: None,
+                tbr: None,
+                height: Some(360),
+            },
+            DlpFormat {
+                url: Some("https://example.com/live.m3u8".into()),
+                protocol: Some("m3u8_native".into()),
+                vcodec: Some("avc1".into()),
+                acodec: Some("mp4a.40.2".into()),
+                abr: None,
+                tbr: None,
+                height: None,
+            },
+        ];
+        assert_eq!(
+            pick_hls_url(&formats).as_deref(),
+            Some("https://example.com/live.m3u8")
+        );
+        assert!(pick_hls_url(&formats[..1]).is_none());
     }
 
     #[test]
@@ -358,20 +474,35 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // needs network + yt-dlp — run explicitly (~25s, two dumps)
+    #[ignore] // needs network + yt-dlp — run explicitly (single default dump)
     fn resolve_real() {
         let r = resolve_stream("https://www.youtube.com/watch?v=dQw4w9WgXcQ").unwrap();
         assert_eq!(r.meta.id, "dQw4w9WgXcQ");
         assert!(!r.is_hls);
         assert!(r.primary_url.starts_with("https://"));
-        println!("primary: {}…", &r.primary_url[..60]);
-        println!(
-            "fallback: {:?}",
-            r.fallback_url.as_deref().map(|u| &u[..60])
-        );
-        assert!(
-            r.fallback_url.is_some(),
-            "expected android progressive fallback"
-        );
+        // Lazy tier-2: no eager android dump anymore — the fallback resolves
+        // reactively on the first 403 instead.
+        assert!(r.fallback_url.is_none());
+    }
+
+    #[test]
+    #[ignore] // needs network + yt-dlp — run explicitly (android dump only, ~10s)
+    fn resolve_live_fast_real() {
+        let r = resolve_live_hls("https://www.youtube.com/watch?v=rFZHOHl-L8A").unwrap();
+        assert!(r.is_hls);
+        assert!(r.primary_url.starts_with("https://"));
+        println!("live fast hls: {}…", &r.primary_url[..60]);
+    }
+
+    #[test]
+    #[ignore] // needs network + yt-dlp — run explicitly (default + android dumps, ~20s)
+    fn resolve_live_real() {
+        // Must come back HLS: the android-client playlist is the ad-free one.
+        let r = resolve_stream("https://www.youtube.com/watch?v=rFZHOHl-L8A").unwrap();
+        assert!(r.meta.is_live, "expected live metadata");
+        assert!(r.is_hls, "expected HLS for a live stream");
+        assert!(r.primary_url.starts_with("https://"));
+        assert!(r.fallback_url.is_none());
+        println!("live hls: {}…", &r.primary_url[..60]);
     }
 }

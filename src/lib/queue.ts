@@ -15,6 +15,7 @@ export interface QueueState {
 
 export type QueueAction =
   | { type: "enqueue"; track: Track }
+  | { type: "play"; track: Track } // enqueue-if-new + select: ▶ means "hear this now"
   | { type: "remove"; index: number }
   | { type: "select"; index: number }
   | { type: "next" }
@@ -31,6 +32,11 @@ export function queueReducer(s: QueueState, a: QueueAction): QueueState {
         items: [...s.items, a.track],
         currentIndex: s.currentIndex === -1 ? 0 : s.currentIndex,
       };
+    case "play": {
+      const exists = s.items.findIndex((t) => t.id === a.track.id);
+      const items = exists >= 0 ? s.items : [...s.items, a.track];
+      return { items, currentIndex: exists >= 0 ? exists : items.length - 1 };
+    }
     case "remove": {
       const items = s.items.filter((_, i) => i !== a.index);
       let cur = s.currentIndex;

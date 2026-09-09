@@ -20,8 +20,12 @@ html, body, #root {
 .titlebar {
   height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 8px;
   padding: 0 2px; border-bottom: 1px solid var(--line);
+  cursor: grab;
 }
+.titlebar:active { cursor: grabbing; }
+.titlebar .gear { cursor: pointer; }
 .titlebar .dots { display: flex; gap: 5px; }
+.titlebar .dots span { cursor: pointer; }
 .titlebar .dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
 .titlebar .dots span:first-child { background: var(--accent); }
 .titlebar .appname {
@@ -74,6 +78,9 @@ h2 .mini:hover { color: var(--accent); }
 .item .x:hover { color: var(--accent); }
 .item.q.on { background: var(--card); border-color: var(--line); }
 .item.q.on .t::before { content: "● "; color: var(--accent); font-size: 9px; }
+/* same treatment for the active track inside search results */
+.results .item.on { background: var(--card); border-color: var(--line); }
+.results .item.on .t::before { content: "● "; color: var(--accent); font-size: 9px; }
 .spin { color: var(--accent); }
 footer.now {
   border-top: 1px solid var(--line); padding-top: 8px; display: flex;

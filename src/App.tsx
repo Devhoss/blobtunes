@@ -1,6 +1,7 @@
 import { useEffect, useRef, useReducer, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isYouTubeUrl } from "./lib/youtube";
 import { initialState, queueReducer, type Track } from "./lib/queue";
 import { toTrack, type SearchItem } from "./lib/search";
@@ -57,8 +58,11 @@ export default function App() {
   );
   const shimRef = useRef<HTMLAudioElement>(null);
   const reqId = useRef(0);
+  const commandBusy = useRef(false);
+  const lastEndedTrack = useRef<string | null>(null);
 
-  const current = queue.currentIndex >= 0 ? queue.items[queue.currentIndex] : undefined;
+  const current =
+    queue.currentIndex >= 0 ? queue.items[queue.currentIndex] : undefined;
   // ACTIVE-TRACK LIVE-STATE AUTHORITY (explicit, binds UI + backend):
   // - `track.isLive` (from search snippet or yt-dlp probe) is a DISPLAY HINT for rows
   //   that are NOT currently playing. It is never the authority for the active track.
@@ -73,7 +77,7 @@ export default function App() {
   //   state on the first player://state push after load, even if it contradicts the hint.
   // - An unplayable track (private/deleted/region-blocked) surfaces as probe error (paste)
   //   or mpv EndFile(Error) (search) — never as a queue flag.
-  const isLive = ps.playing ? ps.duration == null : current?.isLive === true;
+  const isLive = current?.isLive === true || (ps.playing && ps.duration == null);
 
   // subscribe to player state pushes
   useEffect(() => {
@@ -87,8 +91,12 @@ export default function App() {
   // Media Session key routing (always on — keys go to Rust, never to <audio>).
   useEffect(() => {
     if ("mediaSession" in navigator) {
-      navigator.mediaSession.setActionHandler("play", () => invoke("player_play"));
-      navigator.mediaSession.setActionHandler("pause", () => invoke("player_pause"));
+      navigator.mediaSession.setActionHandler("play", () =>
+        invoke("player_play"),
+      );
+      navigator.mediaSession.setActionHandler("pause", () =>
+        invoke("player_pause"),
+      );
       navigator.mediaSession.setActionHandler("previoustrack", () =>
         dispatch({ type: "prev" }),
       );
@@ -134,10 +142,12 @@ export default function App() {
 
   // natural end -> advance queue (user Stop never emits ended)
   useEffect(() => {
-    if (!ps.ended) return;
+    const id = current?.id ?? null;
+    if (!ps.ended || !id || lastEndedTrack.current === id) return;
+    lastEndedTrack.current = id;
     if (queue.items.length > 0) dispatch({ type: "next" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ps.ended]);
+  }, [ps.ended, current?.id, queue.items.length]);
 
   // selected track changed -> load it
   useEffect(() => {
@@ -146,7 +156,7 @@ export default function App() {
       setPs((s) => ({ ...s, error: String(e) })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id]);
+  }, [current?.id, current?.sourceUrl]);
 
   // debounced search (400ms; stale responses dropped by request id)
   useEffect(() => {
@@ -180,18 +190,12 @@ export default function App() {
     return () => clearTimeout(t);
   }, [query, hasKey]);
 
-  const playNow = useCallback(
-    (t: Track) => {
-      const exists = queue.items.findIndex((x) => x.id === t.id);
-      if (exists >= 0) dispatch({ type: "select", index: exists });
-      else {
-        dispatch({ type: "enqueue", track: t });
-      }
-    },
-    [queue.items],
-  );
+  const playNow = useCallback((t: Track) => dispatch({ type: "play", track: t }), []);
 
-  const enqueue = useCallback((t: Track) => dispatch({ type: "enqueue", track: t }), []);
+  const enqueue = useCallback(
+    (t: Track) => dispatch({ type: "enqueue", track: t }),
+    [],
+  );
 
   async function addPastedUrl() {
     const raw = url.trim();
@@ -224,7 +228,20 @@ export default function App() {
     }
   }
 
-  const toggle = () => invoke(ps.paused || !ps.playing ? "player_play" : "player_pause");
+  const sendPlaybackCommand = useCallback(async (name: string, args?: Record<string, unknown>) => {
+    if (commandBusy.current) return;
+    commandBusy.current = true;
+    try {
+      await invoke(name, args);
+    } catch (e) {
+      setPs((s) => ({ ...s, error: String(e) }));
+    } finally {
+      commandBusy.current = false;
+    }
+  }, []);
+
+  const toggle = () =>
+    sendPlaybackCommand(ps.paused || !ps.playing ? "player_play" : "player_pause");
   const vol = (v: number) => {
     setPs((s) => ({ ...s, volume: v }));
     invoke("player_set_volume", { volume: v });
@@ -244,15 +261,39 @@ export default function App() {
   return (
     <div className="app">
       {/* V2 TitleBar — sole window chrome (decorations:false). data-tauri-drag-region
-          makes the frameless window draggable; buttons opt out by default in Tauri. */}
+          makes the frameless window draggable; buttons opt out by default in Tauri.
+          The attribute is repeated on dots/appname so the drag area has no
+          dead spots (text nodes included). Needs
+          core:window:allow-start-dragging in capabilities. */}
       <div className="titlebar" data-tauri-drag-region>
-        <div className="dots">
-          <span />
-          <span />
-          <span />
+        {/* Window controls, macOS traffic-light order: close (hides to tray
+            via intercept_close, same as window ✕) / minimize /
+            maximize-toggle. Needs the matching core:window permissions. */}
+        <div className="dots" data-tauri-drag-region>
+          <span
+            role="button"
+            title="Close (hide to tray)"
+            onClick={() => getCurrentWindow().close()}
+          />
+          <span
+            role="button"
+            title="Minimize"
+            onClick={() => getCurrentWindow().minimize()}
+          />
+          <span
+            role="button"
+            title="Maximize"
+            onClick={() => getCurrentWindow().toggleMaximize()}
+          />
         </div>
-        <div className="appname">Wavesurf</div>
-        <button className="gear" title="Settings" onClick={() => setShowKey((v) => !v)}>
+        <div className="appname" data-tauri-drag-region>
+          Wavesurf
+        </div>
+        <button
+          className="gear"
+          title="Settings"
+          onClick={() => setShowKey((v) => !v)}
+        >
           ⚙
         </button>
       </div>
@@ -285,7 +326,10 @@ export default function App() {
         </div>
       )}
       {showKey && (
-        <label className="shimrow" title="Enable only if media keys don't work without it">
+        <label
+          className="shimrow"
+          title="Enable only if media keys don't work without it"
+        >
           <input
             type="checkbox"
             checked={smtcShim}
@@ -301,17 +345,19 @@ export default function App() {
       <div className="lists">
         {results && (
           <section className="results">
-            <h2>
-              Results {searching && <span className="spin">…</span>}
-            </h2>
+            <h2>Results {searching && <span className="spin">…</span>}</h2>
             {results.map((r) => (
-              <div className="item" key={r.id}>
+              <div className={`item ${r.id === current?.id ? "on" : ""}`} key={r.id}>
                 <img src={r.thumbnail_url} alt="" loading="lazy" />
                 <div className="meta">
                   <div className="t">{r.title}</div>
                   <div className="c">
                     {r.channel}
-                    {r.is_live ? " · LIVE" : r.duration ? ` · ${fmt(r.duration)}` : ""}
+                    {r.is_live
+                      ? " · LIVE"
+                      : r.duration
+                        ? ` · ${fmt(r.duration)}`
+                        : ""}
                   </div>
                 </div>
                 <div className="btns">
@@ -330,7 +376,10 @@ export default function App() {
           <h2>
             Queue{" "}
             {queue.items.length > 0 && (
-              <button className="mini" onClick={() => dispatch({ type: "clear" })}>
+              <button
+                className="mini"
+                onClick={() => dispatch({ type: "clear" })}
+              >
                 clear
               </button>
             )}
@@ -341,7 +390,9 @@ export default function App() {
               key={t.id}
               onClick={() => dispatch({ type: "select", index: i })}
             >
-              {t.thumbnailUrl && <img src={t.thumbnailUrl} alt="" loading="lazy" />}
+              {t.thumbnailUrl && (
+                <img src={t.thumbnailUrl} alt="" loading="lazy" />
+              )}
               <div className="meta">
                 <div className="t">{t.title}</div>
                 <div className="c">
@@ -352,7 +403,8 @@ export default function App() {
                 className="x"
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (i === queue.currentIndex) invoke("player_stop").catch(() => {});
+                  if (i === queue.currentIndex)
+                    invoke("player_stop").catch(() => {});
                   dispatch({ type: "remove", index: i });
                 }}
               >
@@ -368,10 +420,14 @@ export default function App() {
           {current?.thumbnailUrl ? (
             <img className="np-art" src={current.thumbnailUrl} alt="" />
           ) : (
-            <div className="np-art">{(current?.title ?? ps.title ?? "W").trim()[0]}</div>
+            <div className="np-art">
+              {(current?.title ?? ps.title ?? "W").trim()[0]}
+            </div>
           )}
           <div className="np-meta">
-            <div className="np-title">{current?.title ?? ps.title ?? "Wavesurf"}</div>
+            <div className="np-title">
+              {current?.title ?? ps.title ?? "Wavesurf"}
+            </div>
             {(current?.channel || ps.title) && (
               <div className="np-channel">{current?.channel}</div>
             )}
@@ -412,7 +468,9 @@ export default function App() {
           />
         </div>
         {isLive || !ps.seekable || ps.duration == null ? (
-          <div className="seekbar off">{isLive && ps.playing ? "live — no seeking" : ""}</div>
+          <div className="seekbar off">
+            {isLive && ps.playing ? "live — no seeking" : ""}
+          </div>
         ) : (
           <input
             className="seekbar"

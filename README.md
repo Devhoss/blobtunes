@@ -63,7 +63,19 @@ Fill this table in during release testing (`Task 10`).
 ## Known limits
 
 - No private / age-gated / region-blocked videos anonymously (clear error, no crash).
-- VOD loads resolve in ~10–25s on first play (two yt-dlp dumps in parallel).
+- First play resolves in ~6–8s for VOD (one yt-dlp dump; the progressive
+  fallback resolves only if the primary URL fails) and ~15–20s for live
+  (default + android dumps — see below).
+- **Live streams with server-side ad inserts stutter.** Some YouTube live
+  broadcasts (notably 24/7 music streams) splice ad segments into the HLS
+  timeline without discontinuity markers. ffmpeg's demuxer cannot step past
+  these splices: audio stops with no error while the player still shows
+  "playing". Wavesurf detects the frozen position and reloads a fresh
+  playlist automatically (bounded: 5 attempts, then it surfaces an error or
+  advances the queue), so playback resumes — but during heavy ad periods you
+  will hear gaps. This is a limitation of the HLS/ffmpeg stack, not a bug in
+  Wavesurf's control layer (verified: a minimal libmpv harness stalls
+  identically on the same URLs). VOD playback is unaffected.
 - Search needs an API key; quota is real (~100 searches/day free).
 - Tray Quit is the only full exit; window ✕ hides to tray by design.
 

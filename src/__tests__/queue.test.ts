@@ -42,6 +42,27 @@ describe("enqueue", () => {
   });
 });
 
+describe("play", () => {
+  it("plays a new track immediately while another is playing", () => {
+    let s = queueReducer(initialState, { type: "enqueue", track: vod("a") });
+    s = queueReducer(s, { type: "play", track: vod("b") });
+    expect(s.items.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(s.currentIndex).toBe(1); // selected -> player loads it
+  });
+  it("selects an already-queued track without duplicating", () => {
+    let s = queueReducer(initialState, { type: "enqueue", track: vod("a") });
+    s = queueReducer(s, { type: "enqueue", track: vod("b") });
+    s = queueReducer(s, { type: "play", track: vod("a") });
+    expect(s.items).toHaveLength(2);
+    expect(s.currentIndex).toBe(0);
+  });
+  it("plays into an empty queue", () => {
+    const s = queueReducer(initialState, { type: "play", track: vod("a") });
+    expect(s.items.map((t) => t.id)).toEqual(["a"]);
+    expect(s.currentIndex).toBe(0);
+  });
+});
+
 describe("next/prev semantics", () => {
   it("next clamps at the last track", () => {
     let s = queueReducer(initialState, { type: "enqueue", track: vod("a") });
