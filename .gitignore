@@ -31,7 +31,9 @@ portable/
 # agent scratch / session plans
 .zcode/
 
-# design scratch (superseded by src-tauri/icons/)
+# design scratch (local only — not in the public repo)
+design/
+sketches/
 app-icon.png
 app-icon.jpg
 
