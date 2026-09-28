@@ -26,3 +26,16 @@ dist-ssr
 # wavesurf: mpv dev artifacts + bundled dll (never commit binaries)
 tools/mpv/
 src-tauri/bin/
+portable/
+
+# agent scratch / session plans
+.zcode/
+
+# design scratch (superseded by src-tauri/icons/)
+app-icon.png
+app-icon.jpg
+
+# env / local secrets
+.env
+.env.*
+!.env.example

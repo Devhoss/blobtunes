@@ -1,118 +1,112 @@
-:root {
-  --bg: #0a0a0a;
-  --card: #161616;
-  --line: #232323;
-  --fg: #f5f5f5;
-  --dim: #8a8a8a;
-  --accent: #ff453a;
-}
-* { box-sizing: border-box; margin: 0; }
-html, body, #root {
-  height: 100%;
-  background: var(--bg);
-  color: var(--fg);
-  font: 13px/1.4 "Segoe UI Variable", "Geist Variable", system-ui, sans-serif;
-  user-select: none;
-  overflow: hidden;
-}
-.app { display: flex; flex-direction: column; height: 100%; padding: 10px; gap: 8px; }
-/* V2 TitleBar — sole window chrome (decorations:false). 28px fixed. */
-.titlebar {
-  height: 28px; flex-shrink: 0; display: flex; align-items: center; gap: 8px;
-  padding: 0 2px; border-bottom: 1px solid var(--line);
-  cursor: grab;
-}
-.titlebar:active { cursor: grabbing; }
-.titlebar .gear { cursor: pointer; }
-.titlebar .dots { display: flex; gap: 5px; }
-.titlebar .dots span { cursor: pointer; }
-.titlebar .dots span { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
-.titlebar .dots span:first-child { background: var(--accent); }
-.titlebar .appname {
-  font-family: monospace; font-size: 10px; letter-spacing: 2px;
-  color: var(--dim); text-transform: uppercase;
-}
-.row { display: flex; gap: 6px; }
-input, button { font: inherit; color: inherit; }
-input {
-  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-  padding: 7px 10px; outline: none; width: 100%;
-}
-input:focus { border-color: var(--accent); }
-button {
-  background: var(--card); border: 1px solid var(--line); border-radius: 8px;
-  cursor: pointer; padding: 6px 10px;
-}
-button:hover { border-color: var(--dim); }
-button:focus-visible, input:focus-visible { outline: 2px solid rgba(255, 69, 58, 0.6); outline-offset: 1px; }
-.search { flex: 1; height: 34px; }
-.gear { width: 34px; margin-left: auto; }
-.keypanel { display: flex; gap: 6px; align-items: center; }
-.keypanel a { color: var(--dim); font-size: 11px; margin-left: 4px; text-decoration: none; }
-.shimrow { display: flex; gap: 6px; align-items: center; color: var(--dim); font-size: 11px; cursor: pointer; }
-.shimrow input { width: auto; accent-color: var(--accent); }
-.error { color: var(--accent); font-size: 11px; padding: 0 2px; line-height: 1.5; }
-.lists { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
-.lists::-webkit-scrollbar { width: 5px; }
-.lists::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.13); border-radius: 3px; }
-h2 {
-  font-family: monospace; font-size: 10px; font-weight: 500; color: var(--dim);
-  text-transform: uppercase; letter-spacing: 1.6px; margin: 0 2px 4px;
-  display: flex; justify-content: space-between; align-items: center;
-}
-h2 .mini { border: none; background: none; color: var(--dim); font-size: 10px; padding: 0; cursor: pointer; }
-h2 .mini:hover { color: var(--accent); }
-.item { display: flex; gap: 8px; align-items: center; padding: 6px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
-.item:hover { background: var(--card); }
-.item img {
-  width: 80px; height: 45px; border-radius: 6px; object-fit: cover;
-  background: var(--line); flex-shrink: 0;
-}
-.item .meta { flex: 1; min-width: 0; }
-.item .t { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.item .c { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.item .btns { display: flex; gap: 4px; }
-.item .btns button { padding: 4px 8px; }
-.item .btns button:first-child { color: var(--accent); }
-.item .x { border: none; background: none; color: var(--dim); padding: 2px 6px; cursor: pointer; }
-.item .x:hover { color: var(--accent); }
-.item.q.on { background: var(--card); border-color: var(--line); }
-.item.q.on .t::before { content: "● "; color: var(--accent); font-size: 9px; }
-/* same treatment for the active track inside search results */
-.results .item.on { background: var(--card); border-color: var(--line); }
-.results .item.on .t::before { content: "● "; color: var(--accent); font-size: 9px; }
-.spin { color: var(--accent); }
-footer.now {
-  border-top: 1px solid var(--line); padding-top: 8px; display: flex;
-  flex-direction: column; gap: 8px; flex-shrink: 0;
-}
-.np { display: flex; gap: 10px; align-items: center; }
-.np-art {
-  width: 64px; height: 48px; border-radius: 6px; object-fit: cover;
-  background: #1c1c1c; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: center;
-  font-weight: 700; font-size: 18px; color: rgba(255, 255, 255, 0.85);
-}
-.np-meta { flex: 1; min-width: 0; }
-.np-title { font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.np-channel { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.np-sub { color: var(--dim); font-size: 11px; font-variant-numeric: tabular-nums; }
-.np-err { color: var(--accent); font-size: 11px; }
-.live { color: var(--accent); font-weight: 700; letter-spacing: 1px; font-family: monospace; font-size: 11px; }
-.live .dot { animation: blink 1.6s infinite; }
-@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
-.livebar { height: 3px; border-radius: 2px; background: var(--line); position: relative; overflow: hidden; margin-top: 6px; }
-.livebar i { position: absolute; top: 0; bottom: 0; width: 34%; background: var(--accent); border-radius: 2px; animation: slide 2.2s ease-in-out infinite; }
-@keyframes slide { 0% { left: -34%; } 100% { left: 100%; } }
-.controls { display: flex; align-items: center; justify-content: center; gap: 14px; }
-.controls button { background: none; border: none; font-size: 16px; cursor: pointer; min-width: 36px; min-height: 32px; }
-.controls button:hover { color: var(--accent); background: none; }
-.controls .play { font-size: 22px; color: var(--accent); }
-.controls .play:hover { color: #ff6a60; }
-.controls .vol { width: 64px; padding: 0; }
-.seekbar, .vol { accent-color: var(--accent); }
-.seekbar { width: 100%; }
-.seekbar.off { text-align: center; color: var(--dim); font-size: 10px; padding: 4px 0; font-family: monospace; }
-.paste input { flex: 1; height: 32px; }
-.paste button { color: var(--accent); width: 34px; height: 32px; flex-shrink: 0; }
-.paste button:hover { background: rgba(255, 69, 58, 0.12); }
+:root{--bg:#080a0d;--card:#ffffff08;--line:#ffffff12;--fg:#eef1f4;--dim:#8b95a1;--accent:#c9d3dc;--chrome:linear-gradient(120deg,#f4f7fa,#9ba7b2 36%,#e7ecf1 62%,#85929e)}
+*{box-sizing:border-box;margin:0}
+html,body,#root{height:100%;color:var(--fg);font:13px/1.4 "Segoe UI Variable",system-ui,sans-serif;overflow:hidden}
+body{background:radial-gradient(ellipse at 80% 0,#171d27,transparent 65%),var(--bg)}
+.app{display:flex;flex-direction:column;height:100%;padding:10px 12px;gap:8px;background:linear-gradient(160deg,#ffffff03,transparent);user-select:none}
+.titlebar{height:28px;flex-shrink:0;display:flex;align-items:center;gap:10px;padding:0 2px;cursor:grab}
+.titlebar:active{cursor:grabbing}
+.titlebar .dots{display:flex;gap:6px;align-items:center;cursor:default!important;-webkit-app-region:no-drag!important;user-select:none;position:relative;z-index:2;padding:6px 2px}
+.titlebar .dots span{display:block;width:9px;height:9px;border-radius:50%;background:#68727c;cursor:pointer!important;-webkit-app-region:no-drag!important}
+.titlebar .dots span:first-child{background:#d27b7b}
+.titlebar .dots span:nth-child(2){background:#bba473}
+.titlebar .appname{font-size:10px;font-weight:700;letter-spacing:2.4px;text-transform:uppercase;background:var(--chrome);background-clip:text;color:transparent}
+.row{display:flex;gap:6px;flex-shrink:0}
+input,button{font:inherit;color:inherit}
+input{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px;outline:none;width:100%}
+input::placeholder{color:#89939e}
+button{background:var(--card);border:1px solid var(--line);border-radius:9px;cursor:pointer;padding:6px 10px;transition:background .18s,border-color .18s}
+button:hover{border-color:#ffffff30;background:#ffffff0e}
+button:focus-visible,input:focus-visible{outline:2px solid #c9d3dc;outline-offset:2px}
+.search{flex:1;height:34px;font-size:12px}
+.row.top .clear{flex-shrink:0;width:34px;background:none;border-color:transparent;color:var(--dim);font-size:14px}
+.gear{width:30px;margin-left:auto;padding:3px;background:none;border-color:transparent}
+.keypanel{display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex-shrink:0}
+.keypanel input{flex:1;min-width:130px}
+.keypanel a{color:var(--dim);font-size:11px;text-decoration:underline}
+.shimrow{display:flex;gap:6px;align-items:center;color:var(--dim);font-size:11px;cursor:pointer}
+.shimrow input{width:auto;accent-color:var(--accent)}
+.error{color:#ffa0a0;font-size:11px;padding:5px 8px;background:#ff777710;border-radius:8px;overflow-wrap:anywhere}
+.lists{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;min-height:0;padding-bottom:8px}
+.lists::-webkit-scrollbar{width:5px}
+.lists::-webkit-scrollbar-thumb{background:#ffffff20;border-radius:3px}
+h2{font-size:10px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:1.6px;margin:5px 6px 4px;display:flex;justify-content:space-between;align-items:center}
+h2 .mini{border:none;background:none;color:var(--dim);font-size:10px;padding:3px;cursor:pointer}
+.item{display:flex;gap:10px;align-items:center;padding:8px;border-radius:11px;cursor:pointer;border:1px solid transparent;position:relative}
+.item:hover{background:#ffffff07}
+.item img{width:38px;height:38px;border-radius:8px;object-fit:cover;background:var(--line);flex-shrink:0;border:1px solid var(--line)}
+.item .meta{flex:1;min-width:0}
+.item .t{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item .c{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.item .btns{display:flex;gap:3px}
+.item .btns button{padding:8px 9px;border-color:transparent;background:none}
+.item .x{border:none;background:none;color:var(--dim);padding:8px 9px;cursor:pointer}
+.item.on{background:#ffffff0b;border-color:#ffffff07}
+.item.on:before{content:"";position:absolute;left:0;top:24%;width:2px;height:52%;background:var(--chrome);border-radius:9px}
+.item.on .t{color:#f3f6f9}
+/* Active RESULT row: unmistakable vs hover. Accent rail + deeper card share
+   the LIVE pulse color (#ff8b8b) so "playing" has one color language.
+   Static marker only — nothing here animates, so reduced-motion needs nothing. */
+.results .item.on{background:#ffffff12;border-color:#ffffff17}
+.results .item.on:before{background:#ff8b8b}
+/* Shared active marker (results + queue): short enough to survive row
+   truncation — the full "Now playing" phrase ellipsized into "NOW PL…". */
+.item.on .np-tag{color:#ff8b8b;font-weight:700;font-size:10px;letter-spacing:.6px;text-transform:uppercase}
+.spin{color:var(--accent)}
+footer.now{border-top:1px solid var(--line);padding:10px 4px 0;display:flex;flex-direction:column;gap:8px;flex-shrink:0;background:linear-gradient(135deg,#a6bdd009,transparent 60%)}
+.np{display:flex;gap:12px;align-items:center}
+.np-art{width:46px;height:46px;border-radius:50%;object-fit:cover;background:conic-gradient(#dfe5ea,#65717d,#edf1f4,#66727d,#dfe5ea);border:3px solid #a8b4bf;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;color:#eef1f4;box-shadow:0 5px 14px #0008;animation:disc-spin 22s linear infinite;animation-play-state:paused}
+.now.is-playing .np-art{animation-play-state:running}
+.np-meta{flex:1;min-width:0}
+.np-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.np-channel{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.np-sub{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
+.np-err{color:#ffa0a0;font-size:11px;overflow-wrap:anywhere}
+.live{color:#ff8b8b;font-weight:700;letter-spacing:1px;font-size:10px}
+.live .dot{animation:blink 1.6s infinite}
+.livebar{height:2px;border-radius:2px;background:var(--line);position:relative;overflow:hidden}
+.livebar i{position:absolute;top:0;bottom:0;width:34%;background:#ff8b8b;border-radius:2px;animation:slide 2.2s ease-in-out infinite}
+/* Live shimmer rides in the seekbar slot: same 18px footprint as VOD
+   progress, so the footer never reshuffles on live<->VOD switches. */
+.liveslot{height:18px;display:flex;align-items:center}
+.liveslot .livebar{flex:1}
+/* Transport spans the full row: step coins flank a wide play bar that soaks
+   up the old empty spacer, volume docked right. */
+.controls{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.controls .transport{flex:1;display:flex;align-items:center;justify-content:center;gap:10px;min-width:0}
+.controls .volgroup{flex-shrink:0;display:flex;align-items:center;gap:8px}
+/* Step coins: static metal whisper — same family as the play jewel, frozen
+   and dimmer so the live shader keeps the hierarchy. */
+.controls .transport .step{width:34px;height:34px;padding:0;flex-shrink:0;border-radius:50%;background:linear-gradient(160deg,#2b323a,#14181d);border:1px solid #ffffff12;color:#c7d0d9;box-shadow:inset 0 1px 1px #ffffff1f,0 3px 8px #0007}
+.controls .transport .step:hover{color:#fff;border-color:#ffffff26}
+.controls .transport .step.repeat.active{color:#ff8b8b;border-color:#ff8b8b66;background:linear-gradient(160deg,#3a2b2e,#1b1416)}
+.controls .transport .step.repeat{position:relative;display:flex;align-items:center;justify-content:center}
+.controls .transport .step.repeat .one-badge{position:absolute;top:-3px;right:-3px;min-width:14px;height:14px;border-radius:8px;background:#ff8b8b;color:#141114;font-size:9px;font-weight:700;line-height:14px;text-align:center;padding:0 3px}
+.controls button{background:none;border:none;font-size:16px;cursor:pointer;min-width:32px;min-height:32px;padding:4px;color:#bac5cf}
+.controls button:hover{color:#fff}
+/* Liquid-metal play jewel (paper-design shader): shader ring, dark core to
+   match the near-black contract, light glyph. The shader replaces the old
+   CSS conic sheen, so lm-swirl is gone. WebGL failure falls back to the
+   dark core + glyph via the boundary in LiquidPlay.tsx. */
+.controls .play{width:42px;height:42px;border-radius:50%;padding:0;position:relative;display:flex;align-items:center;justify-content:center;background:transparent;overflow:hidden;border:none;box-shadow:0 6px 18px #0009}
+.controls .play .lm-shader{position:absolute;inset:0;display:block}
+.controls .play .lm-shader canvas{width:100%!important;height:100%!important;display:block}
+.controls .play .lm-core{position:absolute;inset:5px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#161b22,#0a0d11 70%);box-shadow:inset 0 1px 2px #ffffff26,inset 0 -2px 5px #000000c8}
+.controls .play .lm-glyph{position:relative;color:#eef1f4;font-size:14px;line-height:1}
+/* Wide play bar: same jewel, stretched — pill core follows the bar.
+   Capped: uncapped flex turns into a trough on wide windows.
+   Slim + short on purpose: the repeat coin shares this row. */
+.controls .transport .play.wide{flex:1 1 auto;width:auto;max-width:96px;height:36px;border-radius:12px}
+.controls .transport .play.wide .lm-core{inset:2px 4px;border-radius:9px}
+.controls .play:hover{filter:brightness(1.1)}
+.controls .play:active{transform:scale(.96)}
+.controls .vol{width:64px;padding:0}
+.controls .volbtn{font-size:14px;min-width:28px}
+.seekbar,.vol{accent-color:var(--accent)}
+.seekbar{width:100%;height:18px;padding:0;border:none;background:transparent}
+.seekbar.off{text-align:center;color:var(--dim);font-size:10px;height:14px}
+.paste input{flex:1;min-width:0;height:30px;font-size:11px}
+.paste button{color:var(--accent);width:32px;height:30px;padding:3px;flex-shrink:0}
+@keyframes disc-spin{to{transform:rotate(360deg)}}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+@keyframes slide{0%{left:-34%}100%{left:100%}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}

@@ -5,6 +5,13 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { isYouTubeUrl } from "./lib/youtube";
 import { initialState, queueReducer, type Track } from "./lib/queue";
 import { toTrack, type SearchItem } from "./lib/search";
+import { rowPrimaryAction, restoreVolume } from "./lib/nowPlaying";
+import {
+  nextRepeatMode,
+  resolveEndedAction,
+  type RepeatMode,
+} from "./lib/nowPlaying";
+import { LiquidPlayGlyph } from "./components/LiquidPlay";
 
 interface PlayerState {
   playing: boolean;
@@ -56,10 +63,27 @@ export default function App() {
   const [smtcShim, setSmtcShim] = useState(
     () => localStorage.getItem("wavesurf:smtcShim") === "1",
   );
+  // Repeat policy: off -> all -> one -> off, persisted like the shim.
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>(() => {
+    const v = localStorage.getItem("wavesurf:repeat");
+    return v === "all" || v === "one" ? v : "off";
+  });
+  function setRepeat(m: RepeatMode) {
+    setRepeatMode(m);
+    localStorage.setItem("wavesurf:repeat", m);
+  }
   const shimRef = useRef<HTMLAudioElement>(null);
   const reqId = useRef(0);
   const commandBusy = useRef(false);
-  const lastEndedTrack = useRef<string | null>(null);
+  const endConsumed = useRef(false); // one action per ended=true episode (see below)
+  const volumeDrag = useRef<number | null>(null);
+  // Seekbar scrub state: ref is the commit-time value, state mirrors it for
+  // rendering. While non-null the thumb is locally controlled and NO seek is
+  // sent (see commitSeek + the seekbar JSX for why).
+  const seekDragRef = useRef<number | null>(null);
+  const [seekDrag, setSeekDrag] = useState<number | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const lastVol = useRef(80); // last non-zero volume, for unmute restore
 
   const current =
     queue.currentIndex >= 0 ? queue.items[queue.currentIndex] : undefined;
@@ -81,7 +105,12 @@ export default function App() {
 
   // subscribe to player state pushes
   useEffect(() => {
-    const un = listen<PlayerState>("player://state", (e) => setPs(e.payload));
+    const un = listen<PlayerState>("player://state", (e) =>
+      setPs(() => ({
+        ...e.payload,
+        volume: volumeDrag.current ?? e.payload.volume,
+      })),
+    );
     invoke<boolean>("has_api_key").then(setHasKey);
     return () => {
       un.then((f) => f());
@@ -105,6 +134,41 @@ export default function App() {
       );
     }
   }, []);
+
+  // Native Windows media session (SMTC) — metadata half. The Rust player owns
+  // playback state, position and the timeline; the queue owns title/channel/
+  // artwork and is the only side that knows whether ⏮/⏭ have a target. Pushed
+  // only when the selection or the queue geometry changes: never per tick.
+  // Without it the OS widget (and Venu) would show an unnamed session while
+  // yt-dlp resolves, and would offer skips that do not exist.
+  useEffect(() => {
+    invoke("player_smtc_meta", {
+      hint: {
+        title: current?.title ?? null,
+        channel: current?.channel ?? null,
+        artwork: current?.thumbnailUrl ?? null,
+        is_live: current?.isLive === true,
+        can_next:
+          queue.currentIndex >= 0 && queue.currentIndex < queue.items.length - 1,
+        can_prev: queue.currentIndex > 0,
+      },
+    }).catch(() => {}); // display-only: never surface as a playback error
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [current?.id, queue.items.length, queue.currentIndex]);
+
+  // OS transport commands that belong to the queue (hardware media keys, the
+  // Windows media flyout, Venu). They re-enter through the SAME reducer actions
+  // the ⏮/⏭ buttons dispatch — no second control path, no duplicated skipping.
+  useEffect(() => {
+    const un = listen<string>("player://media-command", (e) => {
+      if (e.payload === "next") dispatch({ type: "next" });
+      else if (e.payload === "prev") dispatch({ type: "prev" });
+    });
+    return () => {
+      un.then((f) => f());
+    };
+  }, []);
+
 
   // Conditional SMTC fallback element: mounted ONLY when enabled above.
   useEffect(() => {
@@ -140,14 +204,39 @@ export default function App() {
     localStorage.setItem("wavesurf:smtcShim", v ? "1" : "0");
   }
 
-  // natural end -> advance queue (user Stop never emits ended)
+  // natural end -> repeat policy, else advance (user Stop never emits ended).
+  // Live tracks always take the plain next path: never reload/wrap a live feed.
+  // Exactly ONE action per ended=true episode: the flag clears asynchronously
+  // (the new Load pushes ended=false), so without this latch the effect
+  // re-fires on its OWN dispatches — every advance changes deps while ended
+  // is still true, machine-gunning Loads until a push lands (seen in the log:
+  // 14 Loads cycling 4 tracks in 2ms, landing "randomly"). The old track-id
+  // guard couldn't stop it because every iteration has a new id.
   useEffect(() => {
+    if (!ps.ended) {
+      endConsumed.current = false;
+      return;
+    }
+    if (endConsumed.current) return;
     const id = current?.id ?? null;
-    if (!ps.ended || !id || lastEndedTrack.current === id) return;
-    lastEndedTrack.current = id;
-    if (queue.items.length > 0) dispatch({ type: "next" });
+    if (!id || !current) return;
+    endConsumed.current = true;
+    const act = resolveEndedAction({
+      mode: repeatMode,
+      currentIndex: queue.currentIndex,
+      length: queue.items.length,
+      isLive: current.isLive === true,
+    });
+    if (act === "reload") {
+      invoke("player_load", { url: current.sourceUrl }).catch((e) =>
+        setPs((s) => ({ ...s, error: String(e) })),
+      );
+      return;
+    }
+    if (queue.items.length > 0)
+      dispatch(act === "wrap" ? { type: "select", index: 0 } : { type: "next" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ps.ended, current?.id, queue.items.length]);
+  }, [ps.ended, current?.id, queue.items.length, queue.currentIndex, repeatMode]);
 
   // selected track changed -> load it
   useEffect(() => {
@@ -242,9 +331,47 @@ export default function App() {
 
   const toggle = () =>
     sendPlaybackCommand(ps.paused || !ps.playing ? "player_play" : "player_pause");
+  // Commit one seek on scrub release. The old seekbar invoked player_seek on
+  // EVERY change event: a post-EOF drag's first invoke started the reload,
+  // whose state push (duration=null, playing=true) flipped the footer into
+  // the live/off branch and UNMOUNTED the input mid-drag — the "slider
+  // releases itself" bug — while the surviving first event carried the
+  // stale end-of-track value. Scrub locally, commit once, on release.
+  const commitSeek = () => {
+    const s = seekDragRef.current;
+    seekDragRef.current = null;
+    setSeekDrag(null);
+    if (s != null) {
+      setPs((p) => ({ ...p, position: s }));
+      invoke("player_seek", { seconds: s }).catch((e) =>
+        setPs((p) => ({ ...p, error: String(e) })),
+      );
+    }
+  };
   const vol = (v: number) => {
+    volumeDrag.current = v;
     setPs((s) => ({ ...s, volume: v }));
-    invoke("player_set_volume", { volume: v });
+    invoke("player_set_volume", { volume: v }).catch((e) =>
+      setPs((s) => ({ ...s, error: String(e) })),
+    );
+  };
+  const finishVolumeDrag = () => {
+    volumeDrag.current = null;
+  };
+  // Track the last sounding volume so unmute restores it.
+  useEffect(() => {
+    if (ps.volume > 0) lastVol.current = ps.volume;
+  }, [ps.volume]);
+  // Mute toggle: fire-and-forget, NO optimistic update. The owner loop
+  // pushes state on change within a tick, and position ticks emit pushes
+  // carrying the pre-command volume in between — an optimistic volume
+  // visibly flaps old -> new -> old -> new (the same reason slider drags
+  // use the volumeDrag guard instead of optimistic updates).
+  const toggleMute = () => {
+    const v = ps.volume === 0 ? restoreVolume(lastVol.current) : 0;
+    invoke("player_set_volume", { volume: v }).catch((e) =>
+      setPs((s) => ({ ...s, error: String(e) })),
+    );
   };
 
   async function saveKey() {
@@ -269,7 +396,7 @@ export default function App() {
         {/* Window controls, macOS traffic-light order: close (hides to tray
             via intercept_close, same as window ✕) / minimize /
             maximize-toggle. Needs the matching core:window permissions. */}
-        <div className="dots" data-tauri-drag-region>
+        <div className="dots no-drag" data-tauri-drag-region="false">
           <span
             role="button"
             title="Close (hide to tray)"
@@ -304,7 +431,21 @@ export default function App() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           spellCheck={false}
+          ref={searchRef}
         />
+        {query && (
+          <button
+            className="clear"
+            title="Clear search"
+            aria-label="Clear search"
+            onClick={() => {
+              setQuery("");
+              searchRef.current?.focus();
+            }}
+          >
+            ×
+          </button>
+        )}
       </div>
 
       {showKey && (
@@ -345,12 +486,27 @@ export default function App() {
       <div className="lists">
         {results && (
           <section className="results">
-            <h2>Results {searching && <span className="spin">…</span>}</h2>
-            {results.map((r) => (
-              <div className={`item ${r.id === current?.id ? "on" : ""}`} key={r.id}>
+            <h2>
+              Results · {results.length}{" "}
+              {searching && <span className="spin">…</span>}
+            </h2>
+            {results.map((r) => {
+              // Active row = the current queue selection: its primary button
+              // mirrors the dock (Pause/Resume via toggle) instead of
+              // repeating ▶, so list and player can never disagree.
+              const isCur = r.id === current?.id;
+              const act = rowPrimaryAction({
+                isCurrent: isCur,
+                playing: ps.playing,
+                paused: ps.paused,
+              });
+              return (
+              <div className={`item ${isCur ? "on" : ""}`} key={r.id}>
                 <img src={r.thumbnail_url} alt="" loading="lazy" />
                 <div className="meta">
-                  <div className="t">{r.title}</div>
+                  <div className="t" title={r.title}>
+                    {r.title}
+                  </div>
                   <div className="c">
                     {r.channel}
                     {r.is_live
@@ -358,18 +514,26 @@ export default function App() {
                       : r.duration
                         ? ` · ${fmt(r.duration)}`
                         : ""}
+                    {isCur && <span className="np-tag"> · Now</span>}
                   </div>
                 </div>
                 <div className="btns">
-                  <button title="Play" onClick={() => playNow(toTrack(r))}>
-                    ▶
+                  <button
+                    title={act.label}
+                    aria-label={`${act.label}: ${r.title}`}
+                    onClick={() =>
+                      act.mode === "toggle" ? toggle() : playNow(toTrack(r))
+                    }
+                  >
+                    {act.glyph}
                   </button>
                   <button title="Queue" onClick={() => enqueue(toTrack(r))}>
                     ＋
                   </button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </section>
         )}
         <section className="queue">
@@ -394,13 +558,18 @@ export default function App() {
                 <img src={t.thumbnailUrl} alt="" loading="lazy" />
               )}
               <div className="meta">
-                <div className="t">{t.title}</div>
+                <div className="t" title={t.title}>
+                  {t.title}
+                </div>
                 <div className="c">
                   {t.channel} · {t.isLive ? "LIVE" : fmt(t.duration)}
+                  {i === queue.currentIndex && <span className="np-tag"> · Now</span>}
                 </div>
               </div>
               <button
                 className="x"
+                title="Remove from queue"
+                aria-label={`Remove ${t.title} from queue`}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (i === queue.currentIndex)
@@ -444,47 +613,131 @@ export default function App() {
                 "paste a YouTube URL below"
               )}
             </div>
-            {isLive && ps.playing && (
-              <div className="livebar">
-                <i />
-              </div>
-            )}
             {ps.error && <div className="np-err">{ps.error.slice(0, 120)}</div>}
           </div>
         </div>
         <div className="controls">
-          <button onClick={() => dispatch({ type: "prev" })}>⏮</button>
-          <button className="play" onClick={toggle}>
-            {ps.paused || !ps.playing ? "▶" : "⏸"}
-          </button>
-          <button onClick={() => dispatch({ type: "next" })}>⏭</button>
-          <input
-            className="vol"
-            type="range"
-            min={0}
-            max={100}
-            value={ps.volume}
-            onChange={(e) => vol(Number(e.target.value))}
-          />
-        </div>
-        {isLive || !ps.seekable || ps.duration == null ? (
-          <div className="seekbar off">
-            {isLive && ps.playing ? "live — no seeking" : ""}
+          <div className="transport">
+            <button
+              className="step"
+              onClick={() => dispatch({ type: "prev" })}
+              aria-label="Previous"
+            >
+              ⏮
+            </button>
+            <button
+              className="play wide"
+              onClick={toggle}
+              aria-label={ps.paused || !ps.playing ? "Play" : "Pause"}
+            >
+              <LiquidPlayGlyph
+                glyph={ps.paused || !ps.playing ? "▶" : "⏸"}
+                repetition={6}
+              />
+            </button>
+            <button
+              className="step"
+              onClick={() => dispatch({ type: "next" })}
+              aria-label="Next"
+            >
+              ⏭
+            </button>
+            <button
+              className={`step repeat${repeatMode !== "off" ? " active" : ""}`}
+              title={
+                repeatMode === "off"
+                  ? "Repeat: off"
+                  : repeatMode === "all"
+                    ? "Repeat queue"
+                    : "Repeat one"
+              }
+              aria-label={
+                repeatMode === "off"
+                  ? "Repeat: off"
+                  : repeatMode === "all"
+                    ? "Repeat queue"
+                    : "Repeat one"
+              }
+              onClick={() => setRepeat(nextRepeatMode(repeatMode))}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="16"
+                height="16"
+                fill="currentColor"
+                aria-hidden="true"
+              >
+                <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z" />
+              </svg>
+              {repeatMode === "one" && <span className="one-badge">1</span>}
+            </button>
           </div>
-        ) : (
+          <div className="volgroup">
+            <button
+              className="volbtn"
+              title={ps.volume === 0 ? "Unmute" : "Mute"}
+              aria-label={ps.volume === 0 ? "Unmute" : "Mute"}
+              onClick={toggleMute}
+            >
+              {ps.volume === 0 ? "🔇" : "🔊"}
+            </button>
+            <input
+              className="vol"
+              type="range"
+              min={0}
+              max={100}
+              value={ps.volume}
+              onChange={(e) => vol(Number(e.target.value))}
+              onPointerUp={finishVolumeDrag}
+              onPointerCancel={finishVolumeDrag}
+              onBlur={finishVolumeDrag}
+            />
+          </div>
+        </div>
+        {/* While scrubbing, ALWAYS render the input (locally valued): a
+            mid-drag swap to the live/off branch cancels pointer capture and
+            "releases" the thumb. Scrubbing sends no commands, so no reload can
+            start under the drag; the single committed seek happens on release. */}
+        {isLive && ps.playing && seekDrag == null ? (
+          // Live indicator lives in the seekbar slot: same footprint as VOD
+          // progress, so live<->VOD switches never reshuffle the footer.
+          <div className="liveslot" aria-label="Live stream">
+            <div className="livebar">
+              <i />
+            </div>
+          </div>
+        ) : seekDrag != null || (!isLive && ps.seekable && ps.duration != null) ? (
           <input
             className="seekbar"
             type="range"
             min={0}
-            max={ps.duration}
+            max={ps.duration ?? 0}
             step={0.5}
-            value={ps.position ?? 0}
+            value={seekDrag ?? (ps.position ?? 0)}
+            onPointerDown={() => {
+              seekDragRef.current = ps.position ?? 0;
+              setSeekDrag(ps.position ?? 0);
+            }}
             onChange={(e) => {
               const s = Number(e.target.value);
-              setPs((p) => ({ ...p, position: s }));
-              invoke("player_seek", { seconds: s });
+              if (seekDragRef.current != null) {
+                // Scrub: local only, committed by onPointerUp.
+                seekDragRef.current = s;
+                setSeekDrag(s);
+              } else {
+                // Keyboard/no-pointer tweak: seek immediately.
+                setPs((p) => ({ ...p, position: s }));
+                invoke("player_seek", { seconds: s }).catch((e) =>
+                  setPs((p) => ({ ...p, error: String(e) })),
+                );
+              }
             }}
+            onPointerUp={commitSeek}
+            onPointerCancel={commitSeek}
+            onBlur={commitSeek}
           />
+        ) : (
+          <div className="seekbar off" />
         )}
         <form
           className="row paste"

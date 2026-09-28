@@ -1,10 +1,14 @@
 use anyhow::{anyhow, Result};
 use libmpv2::{events::Event, events::PropertyData, mpv_end_file_reason, Format, Mpv};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use tauri::{AppHandle, Emitter};
+
+use crate::smtc::{CommandSink, MediaCommand, NowPlaying, Smtc};
+use crate::ytdlp::TrackMeta;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Default)]
 pub struct PlayerState {
@@ -18,6 +22,31 @@ pub struct PlayerState {
     pub title: Option<String>,
     pub ended: bool, // one-shot: natural EOF consumed by frontend
     pub error: Option<String>,
+}
+
+/// What the frontend knows about the item that is playing right now, for the OS
+/// media session (Windows SMTC) only: the queue owns title/channel/artwork, and
+/// it is the only side that knows whether a next/previous item exists.
+///
+/// WHY from the frontend: it is correct the instant a track is selected, while
+/// the yt-dlp resolve that fills the same fields in Rust takes ~6-8s — without
+/// this the OS widget (and Venu) would show an unnamed session for those
+/// seconds. Display only: nothing here can change what or how mpv plays, and a
+/// missing hint just means the resolved metadata is used instead.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct MediaHint {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub artwork: Option<String>,
+    #[serde(default)]
+    pub is_live: bool,
+    #[serde(default)]
+    pub can_next: bool,
+    #[serde(default)]
+    pub can_prev: bool,
 }
 
 #[derive(Debug)]
@@ -36,6 +65,9 @@ pub enum PlayerCmd {
     Stop,
     Seek(f64),     // absolute seconds (VOD only; mpv rejects on live)
     SetVolume(u8), // 0-100
+    /// Frontend -> core display metadata for the OS media session (Windows
+    /// SMTC). Never affects playback: the OS side is a pure mirror of state.
+    SmtcMeta(MediaHint),
     Shutdown,      // terminate the owner thread; dropping Mpv on its own thread
 }
 
@@ -54,9 +86,13 @@ impl Player {
         }));
         let st = Arc::clone(&state);
         let tx2 = tx.clone();
+        // The window the Windows media session attaches to (SMTC needs an
+        // HWND). Resolved here, on the setup thread, because the player thread
+        // must not touch the window; `None` simply means "no media session".
+        let hwnd = main_window_hwnd(&app);
         let handle = thread::Builder::new()
             .name("wavesurf-mpv".into())
-            .spawn(move || run_core(app, tx2, rx, st))
+            .spawn(move || run_core(app, tx2, rx, st, hwnd))
             .map_err(|e| anyhow!("spawn player thread: {e}"))?;
         Ok(Self {
             tx,
@@ -79,17 +115,147 @@ impl Player {
     }
 }
 
+/// The main window's native handle, for the Windows media session (SMTC
+/// attaches to a window: `ISystemMediaTransportControlsInterop::GetForWindow`).
+/// `None` just means no media session is created — never an error.
+#[cfg(windows)]
+fn main_window_hwnd(app: &AppHandle) -> Option<u64> {
+    use tauri::Manager;
+    let hwnd = app.get_webview_window("main")?.hwnd().ok()?;
+    // HWND is an opaque pointer wrapper; SMTC wants it as an integer.
+    Some(hwnd.0 as usize as u64)
+}
+
+#[cfg(not(windows))]
+fn main_window_hwnd(_app: &AppHandle) -> Option<u64> {
+    None
+}
+
+/// Where OS media commands land (hardware media keys, the Windows media flyout,
+/// Venu). Transport commands re-enter the player's own command channel — the
+/// same one every UI button uses — and skips are forwarded to the queue owner
+/// in the frontend, whose ⏮/⏭ actions are the single source of truth. There is
+/// no second command system and no duplicated transport logic.
+struct SmtcCommands {
+    /// `std::sync::mpsc::Sender` is `Send` but not `Sync`, and the WinRT event
+    /// handler must be both. Media keys arrive at human speed, so this lock is
+    /// effectively uncontended; nothing else ever touches it.
+    tx: Mutex<Sender<PlayerCmd>>,
+    app: AppHandle,
+}
+
+impl CommandSink for SmtcCommands {
+    fn dispatch(&self, cmd: MediaCommand) {
+        let to_player = |cmd: PlayerCmd| {
+            if let Ok(tx) = self.tx.lock() {
+                let _ = tx.send(cmd);
+            }
+        };
+        match cmd {
+            MediaCommand::Play => to_player(PlayerCmd::Play),
+            MediaCommand::Pause => to_player(PlayerCmd::Pause),
+            MediaCommand::Stop => to_player(PlayerCmd::Stop),
+            MediaCommand::SeekTo(secs) => to_player(PlayerCmd::Seek(secs)),
+            MediaCommand::Next => {
+                let _ = self.app.emit("player://media-command", "next");
+            }
+            MediaCommand::Previous => {
+                let _ = self.app.emit("player://media-command", "prev");
+            }
+        }
+    }
+}
+
+/// Map the player's state + the display metadata onto one Windows media-session
+/// snapshot. Borrowed throughout, so a call costs a handful of comparisons and
+/// no allocation unless [`Smtc::publish`] decides the OS needs telling.
+///
+/// State mapping (mirrors the app's own transport):
+/// - `playing && !paused` -> SMTC Playing;
+/// - loaded but paused -> SMTC Paused;
+/// - nothing loaded (never loaded / user Stop / terminal error) -> SMTC Stopped
+///   with no metadata at all;
+/// - natural EOF keeps the finished track (SMTC Paused) for as long as the
+///   frontend keeps it selected: the app's own UI leaves that same track on
+///   screen with a working ▶ (post-EOF reload), and a Stopped session would
+///   grey the OS play button out and make it un-replayable from the OS side.
+fn now_playing<'a>(
+    st: &'a PlayerState,
+    hint: Option<&'a MediaHint>,
+    meta: Option<&'a TrackMeta>,
+    is_live: bool,
+) -> NowPlaying<'a> {
+    // Resolved (yt-dlp) metadata wins where it exists — it is authoritative for
+    // what is actually playing — then the frontend's hint.
+    let first = |meta: Option<&'a str>, hint: Option<&'a str>, fallback: &'a str| -> &'a str {
+        [meta, hint]
+            .into_iter()
+            .flatten()
+            .find(|s| !s.is_empty())
+            .unwrap_or(fallback)
+    };
+    let meta_title = meta.map(|m| m.title.as_str());
+    let hint_title = hint.and_then(|h| h.title.as_deref());
+    let title = first(meta_title, hint_title, "Wavesurf");
+    // Stable per-track id: the YouTube video id when known, else the title, so
+    // the OS can tell "new track" from "metadata republished".
+    let track_id = first(
+        meta.map(|m| m.id.as_str()).filter(|id| !id.is_empty()),
+        hint_title,
+        title,
+    );
+    let artist = first(
+        meta.map(|m| m.channel.as_str()),
+        hint.and_then(|h| h.channel.as_deref()),
+        "Wavesurf",
+    );
+    let artwork = meta
+        .and_then(|m| m.thumbnail.as_deref())
+        .or_else(|| hint.and_then(|h| h.artwork.as_deref()))
+        .filter(|a| !a.is_empty())
+        .unwrap_or("");
+    let live = is_live || meta.map(|m| m.is_live).unwrap_or(false);
+    NowPlaying {
+        track_id,
+        title,
+        artist,
+        album: if live { "Live" } else { "YouTube" },
+        artwork_url: artwork,
+        // Loaded — or the track that just finished, which is still selected and
+        // replayable (see the mapping note above).
+        has_track: st.playing || st.ended,
+        playing: st.playing && !st.paused && !st.ended,
+        position_secs: st.position,
+        // `st.duration` is already classified: live HLS reports the sliding
+        // window, not a length, and the player turns that into None.
+        duration_secs: st.duration,
+        can_seek: st.seekable,
+        // The queue decides: a real next/previous item, reported by the
+        // frontend. No hint (nothing selected) -> leave both disabled rather
+        // than inventing a target.
+        can_next: hint.map(|h| h.can_next).unwrap_or(false),
+        can_prev: hint.map(|h| h.can_prev).unwrap_or(false),
+    }
+}
+
 fn build_mpv() -> Result<Mpv> {
     let mpv = Mpv::with_initializer(|init| {
         init.set_option("vo", "null")?; // never create a video output
         init.set_option("video", "no")?; // never decode a video track
         init.set_option("audio-display", "no")?;
-        init.set_option("ytdl", "yes")?; // fallback only; our loads are pre-resolved
-        init.set_option("ytdl-format", "bestaudio/best")?; // audio-first; libmpv decodes anything
-                                                           // Harmless Chrome UA for any direct googlevideo fetch mpv still does
-                                                           // (e.g. HLS segments). NOTE: the VOD 403s were NOT a UA problem — they
-                                                           // were range-gated edges rejecting ffmpeg's open-ended ranges; the fix
-                                                           // is tiered URLs (dash primary, progressive fallback), not headers.
+        // Loads are ALWAYS pre-resolved direct URLs (ytdlp::resolve_stream), so
+        // the ytdl hook has nothing useful to do. Left on, it actively hurts:
+        // when a loadfile URL fails, the hook runs yt-dlp on that googlevideo
+        // URL as a [generic] extractor — a ~13s doomed round trip (it 403s)
+        // before our own recovery even gets a chance, plus another spawned
+        // process on the failure path.
+        init.set_option("ytdl", "no")?;
+        // Harmless Chrome UA for any direct googlevideo fetch mpv still does
+        // (e.g. HLS segments). NOTE: the VOD 403s were NOT a UA problem —
+        // default-client (ANDROID_VR) googlevideo edges reject open-ended
+        // Range requests outright, and lavf only ever issues open-ended
+        // ranges; the fix is resolving the android-client progressive URL as
+        // PRIMARY (see ytdlp::resolve_stream), not headers.
         init.set_option("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")?;
         // Live HLS robustness: ffmpeg's lavf demuxer auto-reconnects on
         // transient segment/playlist failures so live audio doesn't cut
@@ -129,7 +295,7 @@ fn build_mpv() -> Result<Mpv> {
     Ok(mpv)
 }
 
-fn dbg(log: &std::sync::Arc<std::sync::Mutex<std::fs::File>>, msg: &str) {
+pub(crate) fn dbg(log: &std::sync::Arc<std::sync::Mutex<std::fs::File>>, msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = log.lock() {
         let _ = writeln!(f, "[{:.3}] {}", elapsed_secs(), msg);
@@ -152,15 +318,37 @@ fn lock_state(state: &Arc<Mutex<PlayerState>>) -> std::sync::MutexGuard<'_, Play
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Cancel flag for the latest spawned resolve. Every new resolve arms a
+/// fresh flag and trips the previous one, so a superseded yt-dlp child is
+/// killed in run_dump's wait loop instead of burning unpack+scan+network
+/// (~30s here) to a completion nobody will read. Without this, rapid
+/// skipping piles up concurrent yt-dlp processes that drag EACH OTHER past
+/// the timeout (seen Sep 2026: 35+ gens in ~70s, nearly all stale/failed).
+static RESOLVE_CANCEL: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+
+/// Arm a fresh cancel flag for a new resolve, tripping the previous one.
+/// A finished thread's flag is harmless (setting it trips nothing alive).
+fn arm_resolver_cancel() -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Some(slot) = RESOLVE_CANCEL.get_or_init(|| Mutex::new(None)).lock().ok() {
+        let mut guard = slot;
+        if let Some(old) = guard.replace(flag.clone()) {
+            old.store(true, Ordering::SeqCst);
+        }
+    }
+    flag
+}
+
 /// Kick off a yt-dlp resolve on its own thread and route the result back
 /// into the owner thread's command channel, tagged with `gen` so a
 /// superseded resolve can be told apart from the current one.
 fn spawn_live_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
     let tx2 = tx.clone();
+    let cancel = arm_resolver_cancel();
     thread::Builder::new()
         .name("wavesurf-live-resolve".into())
         .spawn(move || {
-            let cmd = match crate::ytdlp::resolve_live_hls(&url) {
+            let cmd = match crate::ytdlp::resolve_live_hls(&url, &cancel) {
                 Ok(t) => PlayerCmd::LoadResolved(gen, t),
                 Err(e) => PlayerCmd::ResolveFailed(gen, e.to_string()),
             };
@@ -177,10 +365,11 @@ fn spawn_live_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
 
 fn spawn_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
     let tx2 = tx.clone();
+    let cancel = arm_resolver_cancel();
     thread::Builder::new()
         .name("wavesurf-resolve".into())
         .spawn(move || {
-            let cmd = match crate::ytdlp::resolve_stream(&url) {
+            let cmd = match crate::ytdlp::resolve_stream(&url, &cancel) {
                 Ok(t) => PlayerCmd::LoadResolved(gen, t),
                 Err(e) => PlayerCmd::ResolveFailed(gen, e.to_string()),
             };
@@ -195,6 +384,41 @@ fn spawn_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
         .ok();
 }
 
+/// (Re)play the current track after EOF. After EndFile(Eof) mpv's core is
+/// idle with NO file loaded, so pause is a silent no-op and seek fails with
+/// MPV_ERROR_COMMAND ("seek: raw(-12)") — and `current_url` is the original
+/// YouTube URL, which a direct loadfile can't play (the ytdl hook is OFF;
+/// mpv would try to decode the watch page → "Failed to recognize file
+/// format"). So go back through the resolver: the 20-min resolve cache
+/// returns the still-valid googlevideo URL instantly, and past the TTL a
+/// fresh resolve is exactly what an expired URL needs anyway.
+fn reload_current(
+    state: &Arc<Mutex<PlayerState>>,
+    tx: &Sender<PlayerCmd>,
+    current_url: &Option<String>,
+    load_gen: &mut u64,
+    log: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+) -> Result<()> {
+    let url = current_url
+        .clone()
+        .ok_or_else(|| anyhow!("nothing loaded to replay"))?;
+    dbg(log, "post-EOF reload (re-resolving)");
+    *load_gen += 1;
+    {
+        let mut st = lock_state(state);
+        st.ended = false;
+        st.loading = true;
+        st.playing = true;
+        st.error = None;
+        st.position = None;
+        st.duration = None;
+        st.seekable = false;
+        st.title = None;
+    }
+    spawn_resolver(tx, *load_gen, url);
+    Ok(())
+}
+
 /// Max automatic reconnect attempts for a live stream before giving up and
 /// surfacing a real error (guards against spinning forever on a broadcast
 /// that has genuinely ended).
@@ -204,7 +428,9 @@ const MAX_LIVE_RETRIES: u32 = 3;
 /// trigger (EndFile tag / wait_event error / watchdog) and is logged with
 /// every attempt so the log always shows WHY a recovery happened.
 /// - VOD: one reactive android-progressive resolve per track load
-///   (`vod_fallback_used`), then a terminal error. Bounded by construction.
+///   (`vod_fallback_used`), skipped entirely when the primary already came
+///   from the android client (`fallback_exhausted`), then a terminal error.
+///   Bounded by construction.
 /// - Live: re-resolve + reload, capped at MAX_LIVE_RETRIES.
 /// Returns true if a recovery attempt was kicked off (state left in
 /// loading/playing), false if the caller should surface a terminal error.
@@ -213,9 +439,7 @@ const MAX_LIVE_RETRIES: u32 = 3;
 #[allow(clippy::too_many_arguments)]
 fn attempt_recovery(
     st: &mut PlayerState,
-    mpv: &Mpv,
     tx: &Sender<PlayerCmd>,
-    fallback: &mut Option<String>,
     is_live: bool,
     live_retry_count: &mut u32,
     current_url: &Option<String>,
@@ -224,29 +448,12 @@ fn attempt_recovery(
     vod_fallback_used: &mut bool,
     reason: &str,
 ) -> bool {
-    if let Some(url) = fallback.take() {
-        dbg(
-            log,
-            &format!("VOD tier-2 fallback: retrying with progressive URL (trigger: {reason})"),
-        );
-        st.error = None;
-        st.loading = true;
-        st.playing = true;
-        if mpv.command("loadfile", &[url.as_str(), "replace"]).is_err() {
-            st.loading = false;
-            st.playing = false;
-            st.error = Some("mpv playback error".into());
-            return false;
-        }
-        return true;
-    }
-    // VOD live-reconnect/no-fallback: the tier-1 DASH URL failed (e.g. a 403).
-    // Resolve the android progressive URL reactively and retry it once — this
-    // is what keeps the lazy-fallback design working without paying for the
-    // slow android extraction on the fast path.
-    // Bounded: exactly one reactive attempt per track load. A second failure
-    // means a different problem (or a dead URL) — surfacing an error is more
-    // honest than re-resolving forever.
+    // VOD: the primary URL failed (e.g. a 403). If the primary was NOT the
+    // android progressive URL, resolve that reactively and retry it once —
+    // one attempt per track load. When the primary IS the android URL (the
+    // normal case; `vod_fallback_used` was set from fallback_exhausted at
+    // LoadResolved) there is nothing left to resolve and a second failure
+    // surfaces a terminal error.
     if !is_live && !*vod_fallback_used {
         let url = match current_url.clone() {
             Some(u) => u,
@@ -263,7 +470,12 @@ fn attempt_recovery(
                 &log,
                 &format!("VOD tier-2 fallback reactively resolving (trigger: {reason})"),
             );
-            let fallback = match crate::ytdlp::resolve_fallback_url(&url) {
+            let fallback = match crate::ytdlp::resolve_fallback_url(
+                &url,
+                // Owner-thread reactive fallback: synchronous by design, so it
+                // carries a never-tripped flag and keeps its 90s budget.
+                &AtomicBool::new(false),
+            ) {
                 Ok(Some(u)) => u,
                 Ok(None) => {
                     dbg(&log, "VOD tier-2 fallback: no progressive format found");
@@ -286,8 +498,8 @@ fn attempt_recovery(
                         thumbnail: None,
                     },
                     primary_url: fallback.clone(),
-                    fallback_url: None,
                     is_hls: false,
+                    fallback_exhausted: true,
                 },
             );
             let _ = tx.send(cmd);
@@ -340,6 +552,7 @@ fn run_core(
     tx: Sender<PlayerCmd>,
     rx: Receiver<PlayerCmd>,
     state: Arc<Mutex<PlayerState>>,
+    hwnd: Option<u64>,
 ) {
     // Prefer the usual dev-machine path, but never let a missing drive/dir
     // panic this thread (that used to brick the whole player permanently
@@ -379,11 +592,32 @@ fn run_core(
         }
     };
     let mut last: Option<PlayerState> = None;
-    // Tier-2 fallback URL (progressive), armed per track. Consumed once on an
-    // early EndFile(Error); cleared on every new load/stop.
-    let mut fallback: Option<String> = None;
+    // Windows media session (SMTC): a pure side channel that mirrors what this
+    // thread already knows, so Windows' media flyout, the hardware media keys
+    // and Venu can see it. Started here — not in setup — so OS commands come
+    // back on THIS command channel, the same one every UI button uses; there is
+    // no second control path. `None` when there is no window handle (no window
+    // to attach the session to, or not Windows at all), in which case nothing is
+    // published and playback is entirely unaffected.
+    let smtc = hwnd.map(|hwnd| {
+        dbg(&log, &format!("smtc: starting bridge for hwnd {hwnd:#x}"));
+        Smtc::start(
+            hwnd,
+            Arc::new(SmtcCommands {
+                tx: Mutex::new(tx.clone()),
+                app: app.clone(),
+            }),
+            Arc::clone(&log),
+        )
+    });
+    // Display metadata for that session: what the frontend queued (title,
+    // channel, artwork + whether ⏮/⏭ exist) and what the yt-dlp resolve
+    // confirmed. Display only — never read by anything that drives playback.
+    let mut media_hint: Option<MediaHint> = None;
+    let mut resolved_meta: Option<TrackMeta> = None;
     // Original URL of the currently loaded track, kept so a live stream can
-    // be re-resolved and reloaded on failure.
+    // be re-resolved and reloaded on failure, and so a post-EOF Play/Seek can
+    // reload the same track.
     let mut current_url: Option<String> = None;
     // Whether the current track is a live HLS stream (gates auto-reconnect).
     let mut is_live: bool = false;
@@ -413,15 +647,32 @@ fn run_core(
     // stream gets time to fill its buffer before the watchdog may fire.
     let mut last_recovery: Option<std::time::Instant> = None;
     // VOD reactive-fallback guard: exactly one android-progressive resolve
-    // per track load (reset on Load/Stop). Without this, a track whose
-    // fallback URL also fails would re-resolve forever.
+    // per track load (reset on Load/Stop, set from `fallback_exhausted` on
+    // LoadResolved). Without this, a track whose fallback URL also fails
+    // would re-resolve forever.
     let mut vod_fallback_used = false;
+    // Seek requested while the player was post-EOF (no file loaded). Applied
+    // as a plain seek once the reload's FileLoaded arrives.
+    let mut pending_seek: Option<f64> = None;
+    // True between a post-EOF Play/Seek reload and its FileLoaded. In that
+    // window there is no file to seek, so drag events (which arrive as a
+    // STREAM of Seek commands) must retarget pending_seek instead of hitting
+    // mpv — each would fail with raw(-12) and the first (stale, end-of-track)
+    // value would otherwise be the only one that ever applied.
+    let mut reload_in_flight = false;
 
     loop {
         // 1) drain pending commands (non-blocking)
         while let Ok(cmd) = rx.try_recv() {
             if matches!(cmd, PlayerCmd::Shutdown) {
                 dbg(&log, "Shutdown received");
+                // Release the OS media session first: Windows (and Venu) must
+                // not keep a ghost "Wavesurf is playing" entry after the app is
+                // gone. detach() joins the SMTC thread; the Drop below is then a
+                // no-op.
+                if let Some(smtc) = smtc.as_ref() {
+                    smtc.detach();
+                }
                 mpv.command("stop", &[]).ok(); // release audio promptly
                 return; // drops Mpv on THIS thread, then the thread exits; Player::shutdown joins it
             }
@@ -436,7 +687,12 @@ fn run_core(
                     is_live = false;
                     live_retry_count = 0;
                     vod_fallback_used = false; // fresh track, fresh fallback budget
+                    pending_seek = None; // a queued post-EOF seek is moot now
+                    reload_in_flight = false;
                     last_raw_duration = None;
+                    // The OS session shows the new item's metadata (from the
+                    // frontend hint) until the resolve below confirms it.
+                    resolved_meta = None;
                     {
                         let mut st = lock_state(&state);
                         st.loading = true;
@@ -453,7 +709,10 @@ fn run_core(
                 }
                 PlayerCmd::ResolveFailed(gen, e) => {
                     if *gen != load_gen {
-                        dbg(&log, &format!("stale ResolveFailed (gen {gen}) ignored"));
+                        dbg(
+                            &log,
+                            &format!("stale ResolveFailed (gen {gen}) ignored: {e}"),
+                        );
                     } else {
                         dbg(&log, &format!("ResolveFailed: {e}"));
                         let mut st = lock_state(&state);
@@ -501,31 +760,51 @@ fn run_core(
                             ),
                         );
                         is_live = t.is_hls;
-                        // Reactive VOD fallback resolves carry an empty meta
-                        // (URL-only recovery) — don't clobber the real title.
+                        // Record whether a reactive android re-resolve could
+                        // ever help this track: it can't when the primary
+                        // already came from the android client (the normal
+                        // VOD case) or after a reactive resolve. Reactive VOD
+                        // fallback resolves carry an empty meta (URL-only
+                        // recovery) — don't clobber the real title.
+                        vod_fallback_used = t.fallback_exhausted;
                         if !t.meta.title.is_empty() {
                             let mut st = lock_state(&state);
                             st.title = Some(t.meta.title.clone());
+                            // Resolved metadata is authoritative for the OS
+                            // media session (real channel + thumbnail). Reactive
+                            // VOD-fallback resolves carry an empty meta and must
+                            // NOT clobber what the frontend already handed us.
+                            resolved_meta = Some(t.meta.clone());
                         }
-                        if t.is_hls {
-                            // Live HLS: native playback, no VOD fallback tier applies
-                            // (auto-reconnect on failure is handled separately, above).
-                            fallback = None;
-                            mpv.command("loadfile", &[t.primary_url.as_str(), "replace"])
-                                .map_err(|e| anyhow!("loadfile: {e}"))
-                        } else {
-                            // VOD tier 1 (best dash) now, tier 2 (progressive)
-                            // armed for one automatic retry on early failure.
-                            fallback = t.fallback_url.clone();
-                            mpv.command("loadfile", &[t.primary_url.as_str(), "replace"])
-                                .map_err(|e| anyhow!("loadfile: {e}"))
+                        // mpv's pause is sticky across loadfile: a pause left
+                        // over from an earlier track would start this one
+                        // silent while state says playing. Every load is an
+                        // explicit play intent — clear it first (log-only:
+                        // the loadfile tail below owns this arm's Result).
+                        if let Err(e) = mpv.set_property("pause", false) {
+                            dbg(&log, &format!("unpause failed: {e}"));
                         }
+                        mpv.command("loadfile", &[t.primary_url.as_str(), "replace"])
+                            .map_err(|e| anyhow!("loadfile: {e}"))
                     }
                 }
                 PlayerCmd::Play => {
                     dbg(&log, "Play");
-                    mpv.set_property("pause", false)
-                        .map_err(|e| anyhow!("play: {e}"))
+                    // Post-EOF the core is idle with no file loaded — unpausing
+                    // is a silent no-op and the UI would stay stuck on "ended".
+                    // Reload the track instead (VOD only: `ended` is only ever
+                    // set on the VOD EOF path).
+                    let ended = lock_state(&state).ended;
+                    if ended {
+                        let r = reload_current(&state, &tx, &current_url, &mut load_gen, &log);
+                        if r.is_ok() {
+                            reload_in_flight = true;
+                        }
+                        r
+                    } else {
+                        mpv.set_property("pause", false)
+                            .map_err(|e| anyhow!("play: {e}"))
+                    }
                 }
                 PlayerCmd::Pause => {
                     dbg(&log, "Pause");
@@ -534,7 +813,6 @@ fn run_core(
                 }
                 PlayerCmd::Stop => {
                     dbg(&log, "Stop");
-                    fallback = None;
                     // Prevent a stray post-Stop EndFile(Error) from
                     // triggering an unwanted reconnect on a track the user
                     // explicitly stopped.
@@ -542,12 +820,34 @@ fn run_core(
                     current_url = None;
                     live_retry_count = 0;
                     vod_fallback_used = false;
+                    pending_seek = None;
+                    reload_in_flight = false;
+                    resolved_meta = None; // nothing playing: no session metadata
                     mpv.command("stop", &[]).map_err(|e| anyhow!("stop: {e}"))
                 }
                 PlayerCmd::Seek(s) => {
                     dbg(&log, &format!("Seek: {s}"));
-                    mpv.command("seek", &[&s.to_string(), "absolute"])
-                        .map_err(|e| anyhow!("seek: {e}"))
+                    // Post-EOF there is no file loaded — a seek would fail
+                    // with MPV_ERROR_COMMAND ("seek: raw(-12)"). Reload the
+                    // track and jump to the requested position once it loads.
+                    let ended = lock_state(&state).ended;
+                    if ended {
+                        pending_seek = Some(*s);
+                        let r = reload_current(&state, &tx, &current_url, &mut load_gen, &log);
+                        if r.is_ok() {
+                            reload_in_flight = true;
+                        }
+                        r
+                    } else if reload_in_flight {
+                        // Reload in flight, file not loaded yet: a plain seek
+                        // has nothing to act on. A drag arrives as a stream of
+                        // Seek commands — keep only the freshest target.
+                        pending_seek = Some(*s);
+                        Ok(())
+                    } else {
+                        mpv.command("seek", &[&s.to_string(), "absolute"])
+                            .map_err(|e| anyhow!("seek: {e}"))
+                    }
                 }
                 PlayerCmd::SetVolume(v) => {
                     dbg(&log, &format!("SetVolume: {v}"));
@@ -557,6 +857,23 @@ fn run_core(
                     }
                     mpv.set_property("volume", i64::from(*v))
                         .map_err(|e| anyhow!("volume: {e}"))
+                }
+                // Display metadata for the OS media session (see MediaHint).
+                // Logged so the OS side can be diagnosed from the player log.
+                PlayerCmd::SmtcMeta(hint) => {
+                    dbg(
+                        &log,
+                        &format!(
+                            "SmtcMeta: title={:?} channel={:?} artwork={} next={} prev={}",
+                            hint.title.as_deref().unwrap_or(""),
+                            hint.channel.as_deref().unwrap_or(""),
+                            hint.artwork.is_some(),
+                            hint.can_next,
+                            hint.can_prev
+                        ),
+                    );
+                    media_hint = Some(hint.clone());
+                    Ok(())
                 }
                 PlayerCmd::Shutdown => Ok(()), // handled above; unreachable here
             };
@@ -580,9 +897,7 @@ fn run_core(
                     st.loading = false;
                     if !attempt_recovery(
                         &mut st,
-                        &mpv,
                         &tx,
-                        &mut fallback,
                         is_live,
                         &mut live_retry_count,
                         &current_url,
@@ -631,6 +946,15 @@ fn run_core(
                             if let Ok(title) = mpv.get_property::<String>("media-title") {
                                 st.title = Some(title);
                             }
+                            // A seek that arrived while post-EOF (no file
+                            // loaded) — the reload just confirmed; jump now.
+                            reload_in_flight = false;
+                            if let Some(s) = pending_seek.take() {
+                                dbg(&log, &format!("applying pending post-EOF seek: {s}"));
+                                if let Err(e) = mpv.command("seek", &[&s.to_string(), "absolute"]) {
+                                    dbg(&log, &format!("pending seek failed: {e}"));
+                                }
+                            }
                         }
                         Event::EndFile(reason) => {
                             let tag = if reason == mpv_end_file_reason::Eof {
@@ -649,7 +973,6 @@ fn run_core(
                             if reason == mpv_end_file_reason::Eof && !is_live {
                                 // Genuine VOD end.
                                 st.ended = true; // frontend advances queue on this
-                                fallback = None;
                             } else if reason == mpv_end_file_reason::Eof
                                 || reason == mpv_end_file_reason::Error
                             {
@@ -667,9 +990,7 @@ fn run_core(
                                 // can't tight-loop the way that option would.
                                 if !attempt_recovery(
                                     &mut st,
-                                    &mpv,
                                     &tx,
-                                    &mut fallback,
                                     is_live,
                                     &mut live_retry_count,
                                     &current_url,
@@ -800,7 +1121,9 @@ fn run_core(
             // property name yields None (visible as such below), never a crash.
             let cache_secs: Option<f64> = mpv.get_property("demuxer-cache-time").ok();
             let cur_ao: Option<String> = mpv.get_property("current-ao").ok();
-            dbg!(
+            // NOTE: this is the file-logging dbg() helper above, NOT the std
+            // dbg! macro — the macro variant dumped every heartbeat to stderr.
+            dbg(
                 &log,
                 &format!(
                     "beat pos={:.1} dur={:?} paused={} playing={} loading={} seekable={} idle={} cache={:?} ao={:?}",
@@ -847,9 +1170,7 @@ fn run_core(
                             last_recovery = Some(now);
                             attempt_recovery(
                                 &mut st,
-                                &mpv,
                                 &tx,
-                                &mut fallback,
                                 is_live,
                                 &mut live_retry_count,
                                 &current_url,
@@ -866,8 +1187,22 @@ fn run_core(
             }
         }
 
-        // 3) push state to the UI if it changed
+        // 3) Windows media session (SMTC): offer a snapshot every iteration and
+        //    let Smtc decide whether anything has to cross to WinRT — metadata
+        //    and state changes go immediately, position every ~2s (see
+        //    smtc.rs). Free when there is no session (non-Windows, no window
+        //    handle) and a pure mirror: it can never affect playback.
         let snapshot = lock_state(&state).clone();
+        if let Some(smtc) = smtc.as_ref() {
+            smtc.publish(now_playing(
+                &snapshot,
+                media_hint.as_ref(),
+                resolved_meta.as_ref(),
+                is_live,
+            ));
+        }
+
+        // 4) push state to the UI if it changed
         if last.as_ref() != Some(&snapshot) {
             let _ = app.emit("player://state", &snapshot);
             last = Some(snapshot);
@@ -877,9 +1212,120 @@ fn run_core(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::ytdlp::TrackMeta;
+
     #[test]
     fn live_duration_maps_to_none() {
         let duration = 0.0_f64;
         assert_eq!(Some(duration).filter(|d| *d > 0.5), None);
+    }
+
+    // --- OS media session mapping (now_playing) ----------------------------
+
+    fn playing() -> PlayerState {
+        PlayerState {
+            playing: true,
+            volume: 80,
+            ..PlayerState::default()
+        }
+    }
+
+    fn resolved() -> TrackMeta {
+        TrackMeta {
+            id: "vid1".to_string(),
+            title: "Resolved title".to_string(),
+            channel: "Channel".to_string(),
+            duration: Some(200.0),
+            is_live: false,
+            thumbnail: Some("https://i.ytimg.com/vi/vid1/maxresdefault.jpg".to_string()),
+        }
+    }
+
+    fn hint() -> MediaHint {
+        MediaHint {
+            title: Some("Queued title".to_string()),
+            channel: Some("Hint channel".to_string()),
+            artwork: Some("https://i.ytimg.com/vi/vid1/hqdefault.jpg".to_string()),
+            is_live: false,
+            can_next: true,
+            can_prev: false,
+        }
+    }
+
+    #[test]
+    fn resolved_metadata_wins_over_the_queue_hint() {
+        let st = playing();
+        let meta = resolved();
+        let h = hint();
+        let np = now_playing(&st, Some(&h), Some(&meta), false);
+        assert_eq!(np.title, "Resolved title");
+        assert_eq!(np.artist, "Channel");
+        assert_eq!(np.track_id, "vid1");
+        assert_eq!(np.album, "YouTube");
+        assert_eq!(np.artwork_url, "https://i.ytimg.com/vi/vid1/maxresdefault.jpg");
+    }
+
+    #[test]
+    fn queue_hint_fills_the_gap_before_the_resolve_lands() {
+        let st = playing();
+        let h = hint();
+        let np = now_playing(&st, Some(&h), None, false);
+        assert_eq!(np.title, "Queued title");
+        assert_eq!(np.artist, "Hint channel");
+        assert_eq!(np.artwork_url, "https://i.ytimg.com/vi/vid1/hqdefault.jpg");
+        // No resolve yet == no video id, so the title stands in as the track id.
+        assert_eq!(np.track_id, "Queued title");
+    }
+
+    #[test]
+    fn an_empty_session_is_still_named_and_offers_no_skip() {
+        let st = playing();
+        let np = now_playing(&st, None, None, false);
+        assert_eq!(np.title, "Wavesurf");
+        assert!(!np.title.is_empty(), "the OS widget needs a primary line");
+        assert!(!np.can_next);
+        assert!(!np.can_prev);
+        assert_eq!(np.artwork_url, "", "no artwork must still publish metadata");
+    }
+
+    #[test]
+    fn playback_state_maps_to_the_os_transport() {
+        let mut st = playing();
+        let np = now_playing(&st, None, None, false);
+        assert!(np.has_track && np.playing, "playing -> Playing");
+
+        st.paused = true;
+        let np = now_playing(&st, None, None, false);
+        assert!(np.has_track && !np.playing, "paused -> Paused");
+
+        st.paused = false;
+        st.playing = false;
+        let np = now_playing(&st, None, None, false);
+        assert!(!np.has_track, "stopped / nothing loaded -> Stopped, no track");
+
+        st.ended = true;
+        let h = hint();
+        let np = now_playing(&st, Some(&h), None, false);
+        assert!(np.has_track && !np.playing, "natural EOF keeps a replayable track");
+    }
+
+    #[test]
+    fn live_streams_publish_no_duration_and_no_seek() {
+        let st = playing(); // live: no `duration`, never `seekable`
+        let h = hint();
+        let np = now_playing(&st, Some(&h), None, true);
+        assert_eq!(np.album, "Live");
+        assert_eq!(np.duration_secs, None);
+        assert_eq!(np.position_secs, None);
+        assert!(!np.can_seek);
+    }
+
+    #[test]
+    fn queue_geometry_drives_the_skip_buttons() {
+        let st = playing();
+        let h = hint(); // first of two: next yes, previous no
+        let np = now_playing(&st, Some(&h), None, false);
+        assert!(np.can_next && !np.can_prev);
     }
 }

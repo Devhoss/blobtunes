@@ -60,6 +60,31 @@ Measured on this machine (Windows 11, idle desktop):
 Target claim only: substantially lower than a browser tab rendering video.
 Fill this table in during release testing (`Task 10`).
 
+## Windows media session (SMTC)
+
+The player publishes a real **System Media Transport Controls** session, so
+Windows' own media flyout, the hardware media keys and shell media widgets
+(Venu's Media slide included) can see what is playing. WebView2 cannot do this
+on its own: Chromium's `navigator.mediaSession` never reaches WinRT from a
+WebView2 host.
+
+- Implementation: `src-tauri/src/smtc.rs` — a thin bridge over
+  [`playwire`](https://crates.io/crates/playwire) (SMTC for Windows behind one
+  cross-platform API). One extra thread blocked on a channel; no polling.
+- Published: title, channel (artist), source ("YouTube"/"Live"), the existing
+  YouTube thumbnail (handed to Windows as a URL that IT fetches and caches),
+  duration, position, playing/paused state, and play/pause/stop/⏮/⏭/seek. The
+  session is released while nothing is playing, so no stale entry lingers in
+  Windows or Venu when Wavesurf is stopped or idle.
+- Cadence: metadata and transport state go out the moment they change; position
+  is republished every ~2s while playing (Windows interpolates in between) and
+  immediately on any seek. Unchanged state publishes nothing.
+- Commands from media keys/Windows come back through the same command channel
+  the UI uses; ⏮/⏭ are the queue's own actions and stay disabled when the queue
+  has no target. Nothing is faked for live streams (no duration, no seek).
+- Failure is never fatal: every SMTC error is logged to `player-debug.log` and
+  playback carries on without a session.
+
 ## Known limits
 
 - No private / age-gated / region-blocked videos anonymously (clear error, no crash).
@@ -77,6 +102,8 @@ Fill this table in during release testing (`Task 10`).
   Wavesurf's control layer (verified: a minimal libmpv harness stalls
   identically on the same URLs). VOD playback is unaffected.
 - Search needs an API key; quota is real (~100 searches/day free).
+- Settings → *Media-key fallback (SMTC shim)* is obsolete: the player now
+  publishes a native Windows media session (see above), so leave the shim off.
 - Tray Quit is the only full exit; window ✕ hides to tray by design.
 
 ## License

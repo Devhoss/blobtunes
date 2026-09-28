@@ -88,6 +88,68 @@ fn pick_thumb(t: &ApiThumbs) -> String {
         .unwrap_or_default()
 }
 
+/// Decode the HTML entities YouTube puts in some Data API snippet fields
+/// (`90&#39;s`, `A &amp; B`). Runs at ingestion so the results list and the
+/// player/queue path (via `toTrack`) see identical text. Unknown entities
+/// are left untouched; decoding is idempotent for already-plain text.
+fn decode_html_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+        let rest = &s[i..];
+        let Some(semi) = rest.find(';') else {
+            out.push('&');
+            i += 1;
+            continue;
+        };
+        if semi > 12 {
+            // longer than any entity we handle (`&#x10FFFF;` is 10 chars)
+            out.push('&');
+            i += 1;
+            continue;
+        }
+        let entity = &rest[..=semi];
+        let inner = &entity[1..entity.len() - 1];
+        let decoded: Option<String> = if inner.starts_with('#') {
+            let body = &inner[1..];
+            let code: Option<u32> =
+                if let Some(hex) = body.strip_prefix('x').or_else(|| body.strip_prefix('X')) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    body.parse().ok()
+                };
+            code.and_then(char::from_u32).map(|c| c.to_string())
+        } else {
+            match inner.to_ascii_lowercase().as_str() {
+                "amp" => Some("&".into()),
+                "apos" => Some("'".into()),
+                "gt" => Some(">".into()),
+                "lt" => Some("<".into()),
+                "nbsp" => Some(" ".into()),
+                "quot" => Some("\"".into()),
+                _ => None,
+            }
+        };
+        match decoded {
+            Some(d) => {
+                out.push_str(&d);
+                i += entity.len();
+            }
+            None => {
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// Pure: search.list JSON -> SearchItem list (skips non-video results).
 pub fn parse_search_response(json: &str) -> Result<Vec<SearchItem>> {
     let resp: ApiSearch = serde_json::from_str(json).context("bad search response")?;
@@ -98,8 +160,8 @@ pub fn parse_search_response(json: &str) -> Result<Vec<SearchItem>> {
             let id = i.id.video_id?;
             Some(SearchItem {
                 id: id.clone(),
-                title: i.snippet.title.clone(),
-                channel: i.snippet.channel_title.clone(),
+                title: decode_html_entities(&i.snippet.title),
+                channel: decode_html_entities(&i.snippet.channel_title),
                 thumbnail_url: pick_thumb(&i.snippet.thumbnails),
                 duration: None,
                 is_live: i.snippet.live_broadcast_content == "live",
@@ -315,6 +377,17 @@ mod tests {
             items[1].thumbnail_url,
             "https://i.ytimg.com/vi/liveVideo123/default.jpg"
         );
+    }
+
+    #[test]
+    fn decodes_html_entities_in_titles() {
+        let json = r#"{"items":[{
+          "id":{"videoId":"abc123XYZ_-"},
+          "snippet":{"title":"90&#39;s Chill &amp; LoFi","channelTitle":"Chan &quot;A&quot;",
+            "liveBroadcastContent":"none","thumbnails":{}}}]}"#;
+        let items = parse_search_response(json).unwrap();
+        assert_eq!(items[0].title, "90's Chill & LoFi");
+        assert_eq!(items[0].channel, "Chan \"A\"");
     }
 
     #[test]

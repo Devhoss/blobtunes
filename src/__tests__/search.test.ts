@@ -28,6 +28,10 @@ describe("toTrack normalization", () => {
     const t = toTrack({ ...base, duration: null });
     expect(t.duration).toBeNull();
   });
+  it("decodes HTML entities in YouTube titles", () => {
+    const t = toTrack({ ...base, title: "90&#39;s Chill &amp; LoFi" });
+    expect(t.title).toBe("90's Chill & LoFi");
+  });
   it("missing thumbnail becomes undefined", () => {
     expect(toTrack({ ...base, thumbnail_url: "" }).thumbnailUrl).toBeUndefined();
   });

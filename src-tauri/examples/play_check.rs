@@ -1,11 +1,9 @@
 //! Production-path harness: resolve a YouTube URL exactly like the app does
-//! (ytdlp::resolve_stream — parallel default+android dumps), then play it the
-//! way the Player does: primary first, tier-2 progressive fallback once on
-//! early EndFile(Error), HLS live direct.
+//! (ytdlp::resolve_stream — android-client dump: progressive primary for
+//! VOD, HLS for live), then play it the way the Player does.
 //!
 //! Usage: play_check <youtube-url>
 //! Expected VOD:  `CONFIRMED VOD: dur=...` then `CONFIRMED SEEK: pos=...`
-//!   (possibly via "tier 2" after a primary 403 — that IS the design working)
 //! Expected LIVE: `CONFIRMED LIVE` with no finite duration.
 
 use wavesurf_lib::ytdlp;
@@ -13,19 +11,17 @@ use wavesurf_lib::ytdlp;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let url = args.get(1).expect("usage: play_check <youtube-url>");
-    let t = ytdlp::resolve_stream(url).expect("resolve failed");
+    let t = ytdlp::resolve_stream(url, &std::sync::atomic::AtomicBool::new(false))
+        .expect("resolve failed");
     println!(
-        "resolved: {} | live={} | hls={} | fallback={}",
-        t.meta.title,
-        t.meta.is_live,
-        t.is_hls,
-        t.fallback_url.is_some()
+        "resolved: {} | live={} | hls={} | fallback_exhausted={}",
+        t.meta.title, t.meta.is_live, t.is_hls, t.fallback_exhausted
     );
     let mpv = libmpv2::Mpv::with_initializer(|init| {
         init.set_option("vo", "null")?;
         init.set_option("video", "no")?;
-        init.set_option("ytdl", "yes")?;
-        init.set_option("ytdl-format", "bestaudio/best")?;
+        // Match production: no ytdl hook on pre-resolved direct URLs.
+        init.set_option("ytdl", "no")?;
         init.set_option("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")?;
         // Debug harness: always keep mpv's own log next to the run log.
         init.set_option("msg-level", "all=v")?;
@@ -35,12 +31,7 @@ fn main() {
     .expect("mpv init");
     mpv.enable_all_events().unwrap();
     mpv.disable_deprecated_events().unwrap();
-    let mut fallback = if t.is_hls {
-        None
-    } else {
-        t.fallback_url.clone()
-    };
-    println!("loading tier 1");
+    println!("loading primary");
     mpv.command("loadfile", &[t.primary_url.as_str(), "replace"])
         .unwrap();
     let start = std::time::Instant::now();
@@ -49,13 +40,8 @@ fn main() {
         // NOTE: libmpv2 reports failed EndFile as Err, not as an Event.
         if let Some(evt) = mpv.wait_event(0.5) {
             match evt {
-                Err(_) => {
-                    if let Some(url) = fallback.take() {
-                        println!("tier 1 failed — loading tier 2");
-                        mpv.command("loadfile", &[url.as_str(), "replace"]).unwrap();
-                        continue;
-                    }
-                    println!("FATAL: playback errored with no fallback left");
+                Err(e) => {
+                    println!("FATAL: playback errored ({e})");
                     break;
                 }
                 Ok(ev) => {
@@ -72,10 +58,10 @@ fn main() {
             println!("[{elapsed}s] snap: pos={pos:.1} dur={dur:.1} seekable={seekable}");
         }
         if start.elapsed().as_secs_f64() > 150.0 {
-            println!("TIMEOUT after 150s (pos={pos:.1} dur={dur:.1})");
+            println!("TIMEOUT (pos={pos:.1} dur={dur:.1})");
             break;
         }
-        if pos > 3.0 && dur > 1.0 && seekable {
+        if pos > 3.0 && seekable {
             println!("CONFIRMED VOD: dur={dur:.0}s pos={pos:.1} seekable={seekable}");
             mpv.command("seek", &["10", "absolute"]).unwrap();
             std::thread::sleep(std::time::Duration::from_secs(2));
