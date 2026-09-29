@@ -98,8 +98,13 @@ fn decode_html_entities(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] != b'&' {
-            out.push(bytes[i] as char);
-            i += 1;
+            // Copy the whole CHARACTER, never the byte. `bytes[i] as char`
+            // maps each byte of a multi-byte sequence into Latin-1, so every
+            // non-ASCII title (emoji, curly quotes, em dashes, accents)
+            // reached the UI as mojibake.
+            let ch = s[i..].chars().next().expect("i is a char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
             continue;
         }
         let rest = &s[i..];
@@ -278,7 +283,7 @@ impl SearchClient {
 
     pub async fn search(&self, query: &str) -> Result<Vec<SearchItem>> {
         let key = self.key.lock().unwrap().clone().ok_or_else(|| {
-            anyhow!("YouTube API key not configured — open Settings (⚙) in Wavesurf and paste a key from https://console.cloud.google.com/")
+            anyhow!("YouTube API key not configured — open Settings (⚙) in Blobtunes and paste a key from https://console.cloud.google.com/")
         })?;
         let norm = query.trim().to_lowercase();
         {
@@ -388,6 +393,19 @@ mod tests {
         let items = parse_search_response(json).unwrap();
         assert_eq!(items[0].title, "90's Chill & LoFi");
         assert_eq!(items[0].channel, "Chan \"A\"");
+    }
+
+    #[test]
+    fn keeps_non_ascii_titles_intact() {
+        // Regression: the byte-at-a-time copy mapped every byte of a
+        // multi-byte sequence into Latin-1, so emoji and curly quotes showed
+        // up in the results list as mojibake.
+        let title = "Lofi \u{1F3A7} 90\u{2019}s \u{2014} Chill";
+        let json = format!(
+            r#"{{"items":[{{"id":{{"videoId":"abc"}},"snippet":{{"title":"{title}","channelTitle":"c","liveBroadcastContent":"none","thumbnails":{{}}}}}}]}}"#
+        );
+        let items = parse_search_response(&json).unwrap();
+        assert_eq!(items[0].title, title);
     }
 
     #[test]
