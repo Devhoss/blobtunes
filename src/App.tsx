@@ -2,6 +2,7 @@ import { useEffect, useRef, useReducer, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { isYouTubeUrl } from "./lib/youtube";
 import { initialState, queueReducer, type Track } from "./lib/queue";
 import { toTrack, type SearchItem } from "./lib/search";
@@ -11,7 +12,9 @@ import {
   resolveEndedAction,
   type RepeatMode,
 } from "./lib/nowPlaying";
-import { LiquidPlayGlyph } from "./components/LiquidPlay";
+import { hueOf } from "./lib/theme";
+import { Blob } from "./components/Blob";
+import { SquiggleSeek } from "./components/SquiggleSeek";
 
 interface PlayerState {
   playing: boolean;
@@ -39,12 +42,47 @@ const EMPTY_STATE: PlayerState = {
   error: null,
 };
 
+/** Window geometry, in CSS pixels — what the design was drawn against. 600 is
+ * the design's own card height: the list scrolls inside it, and anything the
+ * design has no room for (the key panel) falls back to the card's own scroll. */
+const NORMAL = { w: 390, h: 600, minW: 340, minH: 520 };
+const MINI = { w: 390, h: 206, minW: 340, minH: 150 };
+
+/** The design's three views: the card itself, live search results, the queue. */
+type View = "now" | "results" | "queue";
+
+/** Size a window so the WEBVIEW gets `w`x`h` CSS pixels.
+ *
+ * Measured here: the display runs at 125% (window dpi 120, webview
+ * devicePixelRatio 1.25), so one CSS pixel is 1.25 window pixels. setSize takes
+ * PHYSICAL pixels, hence the multiply — without it the webview gets 390x700
+ * physical = 312x560 CSS and the whole card renders a fifth too small.
+ * Read that measurement with a DPI-AWARE probe: an unaware shell is handed the
+ * client rect in virtualized units, which reads as if dpr were 1. */
+function cssSize(w: number, h: number): PhysicalSize {
+  const dpr = window.devicePixelRatio || 1;
+  return new PhysicalSize(Math.round(w * dpr), Math.round(h * dpr));
+}
+
+const PLAY_ICON = "M3 1.5v13L14 8z";
+const PAUSE_ICON = "M3 2h3.5v12H3zM9.5 2H13v12H9.5z";
+
 const fmt = (s: number | null) => {
   if (s == null || !isFinite(s)) return "--:--";
   const m = Math.floor(s / 60),
     sec = Math.floor(s % 60);
   return `${m}:${String(sec).padStart(2, "0")}`;
 };
+
+/** Strip tile art: the real thumbnail over the track's hue, or the hue alone
+ * when a track has no art yet. */
+function tile(id: string, thumb?: string): React.CSSProperties {
+  const h = hueOf(id);
+  const gradient = `linear-gradient(135deg,hsl(${h} 90% 62%),hsl(${(h + 60) % 360} 85% 40%))`;
+  return thumb
+    ? { backgroundImage: `url("${thumb}"), ${gradient}` }
+    : { backgroundImage: gradient };
+}
 
 export default function App() {
   const [queue, dispatch] = useReducer(queueReducer, initialState);
@@ -53,40 +91,58 @@ export default function App() {
   const [results, setResults] = useState<SearchItem[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState("");
-  const [url, setUrl] = useState("");
   const [hasKey, setHasKey] = useState(true);
   const [showKey, setShowKey] = useState(false);
   const [keyInput, setKeyInput] = useState("");
+  const [mini, setMiniState] = useState(false);
+  // NOW is the design's card; RESULTS and QUEUE shrink the blob into a header
+  // and hand the rest of the window to the list.
+  const [view, setView] = useState<View>("now");
+  // Which query the current results belong to: Enter plays the top hit only
+  // when the results match what is in the box.
+  const [resultsQuery, setResultsQuery] = useState("");
+  // Enter skips the search debounce; bumping this re-runs the search effect.
+  const [forceTick, setForceTick] = useState(0);
+  // The status strip's idle chatter. Loading and errors are derived, not
+  // stored, so they can never be masked by a stale message.
+  const [msg, setMsg] = useState("feed me a link");
+  const [scrub, setScrub] = useState<number | null>(null);
   // Conditional SMTC fallback (OFF by default): a silent looping element keeps
   // the Windows media session alive IF media keys don't reach the app without
   // it. Verify shimless first; this mounts nothing unless enabled.
   const [smtcShim, setSmtcShim] = useState(
-    () => localStorage.getItem("wavesurf:smtcShim") === "1",
+    () => localStorage.getItem("blobtunes:smtcShim") === "1",
   );
   // Repeat policy: off -> all -> one -> off, persisted like the shim.
   const [repeatMode, setRepeatMode] = useState<RepeatMode>(() => {
-    const v = localStorage.getItem("wavesurf:repeat");
+    const v = localStorage.getItem("blobtunes:repeat");
     return v === "all" || v === "one" ? v : "off";
   });
   function setRepeat(m: RepeatMode) {
     setRepeatMode(m);
-    localStorage.setItem("wavesurf:repeat", m);
+    localStorage.setItem("blobtunes:repeat", m);
   }
+  const listRef = useRef<HTMLDivElement>(null);
+  /** Row index keyboard focus was on, so a re-render can put it back. */
+  const focusedRow = useRef<number | null>(null);
+  /** Set by Enter: search now rather than after the debounce. */
+  const forceNow = useRef(false);
+  /** Set by Enter: play the top hit as soon as the search lands. */
+  const playTop = useRef(false);
   const shimRef = useRef<HTMLAudioElement>(null);
   const reqId = useRef(0);
   const commandBusy = useRef(false);
   const endConsumed = useRef(false); // one action per ended=true episode (see below)
   const volumeDrag = useRef<number | null>(null);
-  // Seekbar scrub state: ref is the commit-time value, state mirrors it for
-  // rendering. While non-null the thumb is locally controlled and NO seek is
-  // sent (see commitSeek + the seekbar JSX for why).
-  const seekDragRef = useRef<number | null>(null);
-  const [seekDrag, setSeekDrag] = useState<number | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const lastVol = useRef(80); // last non-zero volume, for unmute restore
 
   const current =
     queue.currentIndex >= 0 ? queue.items[queue.currentIndex] : undefined;
+  const hue = hueOf(current?.id);
+  const sounding = ps.playing && !ps.paused;
+  const trimmed = query.trim();
+  const isUrl = isYouTubeUrl(trimmed);
   // ACTIVE-TRACK LIVE-STATE AUTHORITY (explicit, binds UI + backend):
   // - `track.isLive` (from search snippet or yt-dlp probe) is a DISPLAY HINT for rows
   //   that are NOT currently playing. It is never the authority for the active track.
@@ -97,11 +153,31 @@ export default function App() {
   //   while buffering; duration==null is the single deciding signal.
   // - Pre-play, `probe_url` is authoritative for pasted URLs (probe.is_live fills the hint).
   // - Search results play UNPROBED in MVP: a stale `liveBroadcastContent` hint may disagree
-  //   with reality until mpv resolves the stream — the dock MUST flip to the mpv-derived
+  //   with reality until mpv resolves the stream — the UI MUST flip to the mpv-derived
   //   state on the first player://state push after load, even if it contradicts the hint.
   // - An unplayable track (private/deleted/region-blocked) surfaces as probe error (paste)
   //   or mpv EndFile(Error) (search) — never as a queue flag.
   const isLive = current?.isLive === true || (ps.playing && ps.duration == null);
+  const canSeek = !isLive && ps.seekable && ps.duration != null;
+
+  // The whole design is tinted from one hue custom property.
+  useEffect(() => {
+    document.documentElement.style.setProperty("--h", String(hue));
+  }, [hue]);
+
+  // Pin the window to the CSS pixels the design was drawn against, so the card
+  // renders at its authored size on this display and mini agrees with it.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const w = getCurrentWindow();
+        await w.setMinSize(cssSize(NORMAL.minW, NORMAL.minH));
+        await w.setSize(cssSize(NORMAL.w, NORMAL.h));
+      } catch {
+        /* window chrome is best-effort */
+      }
+    })();
+  }, []);
 
   // subscribe to player state pushes
   useEffect(() => {
@@ -169,7 +245,6 @@ export default function App() {
     };
   }, []);
 
-
   // Conditional SMTC fallback element: mounted ONLY when enabled above.
   useEffect(() => {
     if (!smtcShim) return;
@@ -193,7 +268,7 @@ export default function App() {
     if (!current || !("mediaSession" in navigator)) return;
     navigator.mediaSession.metadata = new MediaMetadata({
       title: current.title,
-      artist: current.channel || "Wavesurf",
+      artist: current.channel || "Blobtunes",
       album: current.isLive ? "Live" : "YouTube",
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -201,7 +276,7 @@ export default function App() {
 
   function setShim(v: boolean) {
     setSmtcShim(v);
-    localStorage.setItem("wavesurf:smtcShim", v ? "1" : "0");
+    localStorage.setItem("blobtunes:smtcShim", v ? "1" : "0");
   }
 
   // natural end -> repeat policy, else advance (user Stop never emits ended).
@@ -241,32 +316,52 @@ export default function App() {
   // selected track changed -> load it
   useEffect(() => {
     if (!current) return;
+    setMsg("sniffing this one out…");
     invoke("player_load", { url: current.sourceUrl }).catch((e) =>
       setPs((s) => ({ ...s, error: String(e) })),
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id, current?.sourceUrl]);
 
-  // debounced search (400ms; stale responses dropped by request id)
+  // debounced search (400ms; stale responses dropped by request id).
+  // A pasted URL is never a search: the strip stays on the queue and the
+  // GO button becomes an "add this link" action instead.
   useEffect(() => {
-    const q = query.trim();
-    if (q.length < 2) {
+    const q = trimmed;
+    if (isUrl || q.length < 2) {
       setResults(null);
+      setResultsQuery("");
       setSearchErr("");
+      playTop.current = false;
       return;
     }
     if (!hasKey) {
-      setSearchErr("No YouTube API key — open Settings.");
+      setSearchErr("No YouTube API key — open Settings (⚙).");
       setResults(null);
       return;
     }
     const id = ++reqId.current;
+    const immediate = forceNow.current;
+    forceNow.current = false;
     setSearching(true);
     setSearchErr("");
     const t = setTimeout(async () => {
       try {
         const r = await invoke<SearchItem[]>("search_youtube", { query: q });
-        if (id === reqId.current) setResults(r);
+        if (id === reqId.current) {
+          setResults(r);
+          setResultsQuery(q);
+          // "One Enter plays the top hit": the search is already live, so Enter
+          // only has to wait for a round trip that is already in flight.
+          const top = playTop.current ? r[0] : undefined;
+          playTop.current = false;
+          setMsg(
+            r.length
+              ? `${r.length} result${r.length > 1 ? "s" : ""}`
+              : `no results for “${q}”`,
+          );
+          if (top) dispatch({ type: "play", track: toTrack(top) });
+        }
       } catch (e) {
         if (id === reqId.current) {
           setSearchErr(String(e).slice(0, 180));
@@ -275,9 +370,9 @@ export default function App() {
       } finally {
         if (id === reqId.current) setSearching(false);
       }
-    }, 400);
+    }, immediate ? 0 : 400);
     return () => clearTimeout(t);
-  }, [query, hasKey]);
+  }, [trimmed, hasKey, isUrl, forceTick]);
 
   const playNow = useCallback((t: Track) => dispatch({ type: "play", track: t }), []);
 
@@ -286,68 +381,47 @@ export default function App() {
     [],
   );
 
-  async function addPastedUrl() {
-    const raw = url.trim();
-    if (!isYouTubeUrl(raw)) {
-      setSearchErr("Not a valid public YouTube URL.");
-      return;
-    }
-    setSearchErr("");
-    try {
-      const meta = await invoke<{
-        id: string;
-        title: string;
-        channel: string;
-        duration: number | null;
-        is_live: boolean;
-        thumbnail: string | null;
-      }>("probe_url", { url: raw });
-      enqueue({
-        id: meta.id,
-        sourceUrl: raw,
-        title: meta.title,
-        channel: meta.channel,
-        duration: meta.is_live ? null : meta.duration,
-        isLive: meta.is_live,
-        thumbnailUrl: meta.thumbnail ?? undefined,
-      });
-      setUrl("");
-    } catch (e) {
-      setSearchErr(String(e).slice(0, 180));
-    }
+  // Emptying the queue has to stop the sound too: a track the user removed must
+  // not keep playing from a queue that no longer holds it.
+  function clearQueue() {
+    if (current) invoke("player_stop").catch(() => {});
+    dispatch({ type: "clear" });
+    setMsg("queue cleared");
   }
 
-  const sendPlaybackCommand = useCallback(async (name: string, args?: Record<string, unknown>) => {
-    if (commandBusy.current) return;
-    commandBusy.current = true;
-    try {
-      await invoke(name, args);
-    } catch (e) {
-      setPs((s) => ({ ...s, error: String(e) }));
-    } finally {
-      commandBusy.current = false;
-    }
-  }, []);
+  const sendPlaybackCommand = useCallback(
+    async (name: string, args?: Record<string, unknown>) => {
+      if (commandBusy.current) return;
+      commandBusy.current = true;
+      try {
+        await invoke(name, args);
+      } catch (e) {
+        setPs((s) => ({ ...s, error: String(e) }));
+      } finally {
+        commandBusy.current = false;
+      }
+    },
+    [],
+  );
 
-  const toggle = () =>
+  const toggle = useCallback(() => {
+    setMsg(sounding ? "shh…" : "vibing");
     sendPlaybackCommand(ps.paused || !ps.playing ? "player_play" : "player_pause");
-  // Commit one seek on scrub release. The old seekbar invoked player_seek on
-  // EVERY change event: a post-EOF drag's first invoke started the reload,
-  // whose state push (duration=null, playing=true) flipped the footer into
-  // the live/off branch and UNMOUNTED the input mid-drag — the "slider
-  // releases itself" bug — while the surviving first event carried the
-  // stale end-of-track value. Scrub locally, commit once, on release.
-  const commitSeek = () => {
-    const s = seekDragRef.current;
-    seekDragRef.current = null;
-    setSeekDrag(null);
-    if (s != null) {
-      setPs((p) => ({ ...p, position: s }));
-      invoke("player_seek", { seconds: s }).catch((e) =>
+  }, [ps.paused, ps.playing, sounding, sendPlaybackCommand]);
+
+  // Commit one seek on release. Sending a seek per drag event used to start a
+  // reload whose state push unmounted the control mid-drag; the squiggle owns
+  // the drag value locally and commits exactly once here.
+  const commitSeek = useCallback(
+    (seconds: number) => {
+      setPs((p) => ({ ...p, position: seconds }));
+      invoke("player_seek", { seconds }).catch((e) =>
         setPs((p) => ({ ...p, error: String(e) })),
       );
-    }
-  };
+    },
+    [],
+  );
+
   const vol = (v: number) => {
     volumeDrag.current = v;
     setPs((s) => ({ ...s, volume: v }));
@@ -374,6 +448,111 @@ export default function App() {
     );
   };
 
+  async function addLink() {
+    const raw = trimmed;
+    if (!isYouTubeUrl(raw)) {
+      setSearchErr("Not a valid public YouTube URL.");
+      return;
+    }
+    setSearchErr("");
+    setMsg("sniffing this one out…");
+    try {
+      const meta = await invoke<{
+        id: string;
+        title: string;
+        channel: string;
+        duration: number | null;
+        is_live: boolean;
+        thumbnail: string | null;
+      }>("probe_url", { url: raw });
+      enqueue({
+        id: meta.id,
+        sourceUrl: raw,
+        title: meta.title,
+        channel: meta.channel,
+        duration: meta.is_live ? null : meta.duration,
+        isLive: meta.is_live,
+        thumbnailUrl: meta.thumbnail ?? undefined,
+      });
+      setQuery("");
+      setResultsQuery("");
+      setMsg("added to the drawer");
+      setView("queue");
+    } catch (e) {
+      setSearchErr(String(e).slice(0, 180));
+      setMsg("nothing local · paste a link");
+    }
+  }
+
+  // The list is an ordinary vertical scroller, so the wheel needs no help from
+  // us (which is what retired the old non-passive wheel workaround) — but a
+  // re-render rebuilds every row, dropping keyboard focus to the body and
+  // stranding the ↑/↓ walk. Put it back on the same row when that happens.
+  useEffect(() => {
+    const k = focusedRow.current;
+    if (k == null || k < 0) return;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    listRef.current?.querySelectorAll<HTMLElement>(".row")[k]?.focus();
+  });
+
+  // Shrink the real window, not just the layout: the design's mini card is
+  // ~200px tall. Best-effort — the layout still collapses if chrome refuses.
+  const setMini = useCallback((on: boolean) => {
+    setMiniState(on);
+    void (async () => {
+      try {
+        const w = getCurrentWindow();
+        const g = on ? MINI : NORMAL;
+        await w.setMinSize(cssSize(g.minW, g.minH));
+        await w.setSize(cssSize(g.w, g.h));
+      } catch {
+        /* window chrome is best-effort */
+      }
+    })();
+  }, []);
+
+  const seekBy = (delta: number) => {
+    if (!canSeek) return;
+    const next = Math.max(0, Math.min(ps.duration ?? 0, (ps.position ?? 0) + delta));
+    commitSeek(next);
+  };
+
+  // Keyboard shortcuts. The listener is bound once and reads the latest
+  // handlers through a ref, so a state tick never re-subscribes it.
+  const keys = useRef({ toggle, seekBy, setMini, mini, dispatch, setView });
+  keys.current = { toggle, seekBy, setMini, mini, dispatch, setView };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing =
+        !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+      // Esc always goes back to the card, from any view — including the search
+      // box, where it also gives up the caret.
+      if (e.key === "Escape") {
+        if (typing) el?.blur();
+        keys.current.setView("now");
+        return;
+      }
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (typing) return;
+      const k = keys.current;
+      if (e.code === "Space") {
+        e.preventDefault();
+        k.toggle();
+      } else if (e.key === "ArrowRight") k.seekBy(5);
+      else if (e.key === "ArrowLeft") k.seekBy(-5);
+      else if (e.key === "n") k.dispatch({ type: "next" });
+      else if (e.key === "p") k.dispatch({ type: "prev" });
+      else if (e.key === "m") k.setMini(!k.mini);
+    };
+    addEventListener("keydown", onKey);
+    return () => removeEventListener("keydown", onKey);
+  }, []);
+
   async function saveKey() {
     try {
       await invoke("set_api_key", { key: keyInput.trim() });
@@ -385,68 +564,101 @@ export default function App() {
     }
   }
 
+  const err = ps.error || "";
+  const status = err ? err : ps.loading ? "sniffing this one out…" : msg;
+  const dense = view !== "now";
+
+  /** ↑/↓ walk the rows; Enter/Space activate the focused one and must not fall
+   * through to the window shortcuts (Space there means play/pause). */
+  function rowKeys(e: React.KeyboardEvent, index: number, activate: () => void) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      e.stopPropagation();
+      activate();
+      return;
+    }
+    const step = e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0;
+    if (!step) return;
+    e.preventDefault();
+    listRef.current?.querySelectorAll<HTMLElement>(".row")[index + step]?.focus();
+  }
+
   return (
-    <div className="app">
-      {/* V2 TitleBar — sole window chrome (decorations:false). data-tauri-drag-region
-          makes the frameless window draggable; buttons opt out by default in Tauri.
-          The attribute is repeated on dots/appname so the drag area has no
-          dead spots (text nodes included). Needs
-          core:window:allow-start-dragging in capabilities. */}
-      <div className="titlebar" data-tauri-drag-region>
-        {/* Window controls, macOS traffic-light order: close (hides to tray
-            via intercept_close, same as window ✕) / minimize /
-            maximize-toggle. Needs the matching core:window permissions. */}
-        <div className="dots no-drag" data-tauri-drag-region="false">
-          <span
-            role="button"
-            title="Close (hide to tray)"
-            onClick={() => getCurrentWindow().close()}
-          />
-          <span
-            role="button"
-            title="Minimize"
-            onClick={() => getCurrentWindow().minimize()}
-          />
-          <span
-            role="button"
-            title="Maximize"
-            onClick={() => getCurrentWindow().toggleMaximize()}
-          />
-        </div>
-        <div className="appname" data-tauri-drag-region>
-          Wavesurf
+    <div className={`win${mini ? " mini" : ""}${dense ? " dense" : ""}`}>
+      {/* Sole window chrome (decorations:false, transparent): the design's
+          titlebar is the drag region. Buttons opt out automatically in Tauri. */}
+      <div className="tb">
+        <div className="drag" data-tauri-drag-region>
+          BLOBTUNES
         </div>
         <button
-          className="gear"
+          className="tb-btn"
           title="Settings"
+          aria-label="Settings"
           onClick={() => setShowKey((v) => !v)}
         >
           ⚙
         </button>
+        <button
+          className="tb-btn"
+          title={mini ? "Full player (M)" : "Mini mode (M)"}
+          aria-label={mini ? "Full player" : "Mini mode"}
+          onClick={() => setMini(!mini)}
+        >
+          {mini ? "▢" : "–"}
+        </button>
+        <button
+          className="tb-btn"
+          title="Close (hide to tray)"
+          aria-label="Close"
+          onClick={() => getCurrentWindow().close()}
+        >
+          ×
+        </button>
       </div>
-      <div className="row top">
+
+      <form
+        className="cmd"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!trimmed) return;
+          if (isUrl) {
+            void addLink();
+            return;
+          }
+          if (!hasKey) {
+            setSearchErr("No YouTube API key — open Settings (⚙).");
+            return;
+          }
+          // Search is already live as you type, so Enter means "play the top
+          // hit": straight away when the results are current, otherwise as
+          // soon as the round trip Enter just skipped the debounce for lands.
+          setView("results");
+          if (results && resultsQuery === trimmed && results.length > 0) {
+            dispatch({ type: "play", track: toTrack(results[0]) });
+            return;
+          }
+          playTop.current = true;
+          forceNow.current = true;
+          setForceTick((n) => n + 1);
+        }}
+      >
         <input
-          className="search"
-          placeholder="Search YouTube…"
+          id="q"
+          ref={searchRef}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="what are we listening to?"
+          aria-label="Search or paste a YouTube link"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          spellCheck={false}
-          ref={searchRef}
         />
-        {query && (
-          <button
-            className="clear"
-            title="Clear search"
-            aria-label="Clear search"
-            onClick={() => {
-              setQuery("");
-              searchRef.current?.focus();
-            }}
-          >
-            ×
-          </button>
-        )}
-      </div>
+        <button type="submit" disabled={!trimmed}>
+          {isUrl ? "＋" : "GO"}
+        </button>
+      </form>
+
+      {searchErr && <div className="err">{searchErr}</div>}
 
       {showKey && (
         <div className="keypanel">
@@ -464,297 +676,341 @@ export default function App() {
           >
             get a key ↗
           </a>
+          <label className="shimrow" title="Enable only if media keys don't work without it">
+            <input
+              type="checkbox"
+              checked={smtcShim}
+              onChange={(e) => setShim(e.target.checked)}
+            />
+            Media-key fallback (SMTC shim)
+          </label>
         </div>
-      )}
-      {showKey && (
-        <label
-          className="shimrow"
-          title="Enable only if media keys don't work without it"
-        >
-          <input
-            type="checkbox"
-            checked={smtcShim}
-            onChange={(e) => setShim(e.target.checked)}
-          />
-          Media-key fallback (SMTC shim)
-        </label>
       )}
       {smtcShim && <audio ref={shimRef} src="silence.wav" hidden />}
 
-      {searchErr && <div className="error">{searchErr}</div>}
+      <section className="body">
+        <Blob
+          playing={sounding}
+          hasTrack={!!current}
+          hue={hue}
+          dense={dense || mini}
+          onToggle={toggle}
+        />
+        <div className="info">
+          <h1 title={current?.title ?? undefined}>
+            {current?.title ?? ps.title ?? "It's quiet in here"}
+          </h1>
+          <div className="by">
+            {current
+              ? current.channel || "youtube"
+              : "feed me a link or a song name"}
+          </div>
+        </div>
+        <div className="seek">
+          {/* Live draws its shimmer INSIDE the same canvas (see SquiggleSeek),
+              so a live<->VOD switch never reshuffles the card's layout. */}
+          <SquiggleSeek
+            position={ps.position ?? 0}
+            duration={ps.duration ?? 0}
+            playing={sounding}
+            enabled={canSeek}
+            live={isLive}
+            hue={hue}
+            onSeek={commitSeek}
+            onScrub={setScrub}
+          />
+          <div className="times">
+            <span>{fmt(scrub ?? ps.position)}</span>
+            <span>
+              {isLive ? (
+                <span className="live">
+                  <span className="dot">●</span> LIVE
+                </span>
+              ) : (
+                fmt(ps.duration ?? current?.duration ?? null)
+              )}
+            </span>
+          </div>
+        </div>
+        {/* The design's row is exactly prev/play/next, centred. The repeat coin
+            is ours, so it rides absolutely at the right edge instead of
+            pushing the play pill off the card's centre line. */}
+        <div className="ctl">
+          <span className="transport">
+          <button
+            className="b"
+            title="Previous (P)"
+            aria-label="Previous"
+            onClick={() => dispatch({ type: "prev" })}
+          >
+            <svg viewBox="0 0 16 16">
+              <path d="M2 2h2v12H2zM14 2v12L5 8z" />
+            </svg>
+          </button>
+          <button
+            className="b go"
+            title={sounding ? "Pause (Space)" : "Play (Space)"}
+            aria-label={sounding ? "Pause" : "Play"}
+            onClick={toggle}
+          >
+            <svg viewBox="0 0 16 16">
+              <path d={sounding ? PAUSE_ICON : PLAY_ICON} />
+            </svg>
+          </button>
+          <button
+            className="b"
+            title="Next (N)"
+            aria-label="Next"
+            onClick={() => dispatch({ type: "next" })}
+          >
+            <svg viewBox="0 0 16 16">
+              <path d="M12 2h2v12h-2zM2 2l9 6-9 6z" />
+            </svg>
+          </button>
+          </span>
+          <button
+            className={`b repeat${repeatMode !== "off" ? " on" : ""}`}
+            title={
+              repeatMode === "off"
+                ? "Repeat: off"
+                : repeatMode === "all"
+                  ? "Repeat queue"
+                  : "Repeat one"
+            }
+            aria-label={
+              repeatMode === "off"
+                ? "Repeat: off"
+                : repeatMode === "all"
+                  ? "Repeat queue"
+                  : "Repeat one"
+            }
+            onClick={() => setRepeat(nextRepeatMode(repeatMode))}
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z" />
+            </svg>
+            {repeatMode === "one" && <span className="one">1</span>}
+          </button>
+        </div>
+        <div className="vol">
+          {/* The speaker emoji is gone — it rendered as a blurry 10px glyph next
+              to the slider. The label carries the mute toggle instead, so the
+              affordance survives the icon. */}
+          <button
+            className={`volbtn${ps.volume === 0 ? " off" : ""}`}
+            title={ps.volume === 0 ? "Unmute" : "Mute"}
+            aria-label={ps.volume === 0 ? "Unmute" : "Mute"}
+            onClick={toggleMute}
+          >
+            VOL
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={ps.volume}
+            aria-label="Volume"
+            style={{ "--v": `${ps.volume}%` } as React.CSSProperties}
+            onChange={(e) => vol(Number(e.target.value))}
+            onPointerUp={finishVolumeDrag}
+            onPointerCancel={finishVolumeDrag}
+            onBlur={finishVolumeDrag}
+          />
+        </div>
+      </section>
 
-      <div className="lists">
-        {results && (
-          <section className="results">
-            <h2>
-              Results · {results.length}{" "}
-              {searching && <span className="spin">…</span>}
-            </h2>
-            {results.map((r) => {
-              // Active row = the current queue selection: its primary button
-              // mirrors the dock (Pause/Resume via toggle) instead of
-              // repeating ▶, so list and player can never disagree.
-              const isCur = r.id === current?.id;
+      {dense && (
+        <div className="list" ref={listRef}>
+          <div className="lh">
+            <span>
+              {view === "results"
+                ? resultsQuery
+                  ? `for “${resultsQuery}”`
+                  : "results"
+                : "UP NEXT"}
+            </span>
+            <span
+              className={`lh-right${view === "results" && searching ? " pulse" : ""}`}
+            >
+              {view === "results"
+                ? searching
+                  ? "searching…"
+                  : (results?.length ?? 0) > 0
+                    ? "⏎ plays top"
+                    : ""
+                : (
+                  <>
+                    <span>click to jump</span>
+                    {queue.items.length > 0 && (
+                      <button className="clr" onClick={clearQueue}>
+                        clear
+                      </button>
+                    )}
+                  </>
+                )}
+            </span>
+          </div>
+
+          {view === "results" &&
+            searching &&
+            [0, 1, 2, 3, 4].map((k) => (
+              <div className="sr" key={k} aria-hidden="true">
+                <i />
+                <span>
+                  <b />
+                  <b />
+                </span>
+              </div>
+            ))}
+
+          {view === "results" && !searching && (results?.length ?? 0) === 0 && (
+            <div className="empty">
+              {resultsQuery
+                ? `no results for “${resultsQuery}”`
+                : "search above to fill this list"}
+            </div>
+          )}
+          {view === "queue" && queue.items.length === 0 && (
+            <div className="empty">queue is empty · hit + on a result</div>
+          )}
+
+          {view === "results" &&
+            !searching &&
+            results?.map((r, k) => {
+              const t = toTrack(r);
+              const isCur = t.id === current?.id;
+              // The row mirrors the dock (Pause/Resume) instead of repeating a
+              // play glyph, so list and player can never disagree.
               const act = rowPrimaryAction({
                 isCurrent: isCur,
                 playing: ps.playing,
                 paused: ps.paused,
               });
+              const inQueue = queue.items.some((q) => q.id === t.id);
               return (
-              <div className={`item ${isCur ? "on" : ""}`} key={r.id}>
-                <img src={r.thumbnail_url} alt="" loading="lazy" />
-                <div className="meta">
-                  <div className="t" title={r.title}>
-                    {r.title}
+                <div
+                  className={`row${isCur ? " cur" : ""}`}
+                  key={t.id}
+                  role="button"
+                  tabIndex={k === 0 ? 0 : -1}
+                  aria-label={`${act.label}: ${t.title}`}
+                  title={`${t.title}${t.channel ? ` — ${t.channel}` : ""}`}
+                  onFocus={() => (focusedRow.current = k)}
+                  onClick={() => (act.mode === "toggle" ? toggle() : playNow(t))}
+                  onKeyDown={(e) =>
+                    rowKeys(e, k, () =>
+                      act.mode === "toggle" ? toggle() : playNow(t),
+                    )
+                  }
+                >
+                  <div className="t" style={tile(t.id, t.thumbnailUrl)} />
+                  <div className="tx">
+                    <span className="n">{t.title}</span>
+                    <span className="m">
+                      {t.channel}
+                      {r.is_live ? (
+                        <span className="lv">{t.channel ? " · " : ""}● LIVE</span>
+                      ) : t.duration != null ? (
+                        ` · ${fmt(t.duration)}`
+                      ) : (
+                        ""
+                      )}
+                    </span>
                   </div>
-                  <div className="c">
-                    {r.channel}
-                    {r.is_live
-                      ? " · LIVE"
-                      : r.duration
-                        ? ` · ${fmt(r.duration)}`
-                        : ""}
-                    {isCur && <span className="np-tag"> · Now</span>}
+                  <div className="act">
+                    {k === 0 && <span className="kb">⏎</span>}
+                    <button
+                      className="ic"
+                      title={inQueue ? "In queue" : "Add to queue"}
+                      aria-label={
+                        inQueue
+                          ? `${t.title} is already queued`
+                          : `Add ${t.title} to the queue`
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (inQueue) return;
+                        enqueue(t);
+                        setMsg("added to queue");
+                      }}
+                    >
+                      {inQueue ? "✓" : "+"}
+                    </button>
                   </div>
                 </div>
-                <div className="btns">
-                  <button
-                    title={act.label}
-                    aria-label={`${act.label}: ${r.title}`}
-                    onClick={() =>
-                      act.mode === "toggle" ? toggle() : playNow(toTrack(r))
-                    }
-                  >
-                    {act.glyph}
-                  </button>
-                  <button title="Queue" onClick={() => enqueue(toTrack(r))}>
-                    ＋
-                  </button>
-                </div>
-              </div>
               );
             })}
-          </section>
-        )}
-        <section className="queue">
-          <h2>
-            Queue{" "}
-            {queue.items.length > 0 && (
-              <button
-                className="mini"
-                onClick={() => dispatch({ type: "clear" })}
+
+          {view === "queue" &&
+            queue.items.map((t, k) => (
+              <div
+                className={`row${k === queue.currentIndex ? " cur" : ""}`}
+                key={t.id}
+                role="button"
+                tabIndex={k === 0 ? 0 : -1}
+                aria-label={`Play ${t.title}`}
+                title={`${t.title}${t.channel ? ` — ${t.channel}` : ""}`}
+                onFocus={() => (focusedRow.current = k)}
+                onClick={() => dispatch({ type: "select", index: k })}
+                onKeyDown={(e) =>
+                  rowKeys(e, k, () => dispatch({ type: "select", index: k }))
+                }
               >
-                clear
-              </button>
-            )}
-          </h2>
-          {queue.items.map((t, i) => (
-            <div
-              className={`item q ${i === queue.currentIndex ? "on" : ""}`}
-              key={t.id}
-              onClick={() => dispatch({ type: "select", index: i })}
-            >
-              {t.thumbnailUrl && (
-                <img src={t.thumbnailUrl} alt="" loading="lazy" />
-              )}
-              <div className="meta">
-                <div className="t" title={t.title}>
-                  {t.title}
+                <div className="t" style={tile(t.id, t.thumbnailUrl)} />
+                <div className="tx">
+                  <span className="n">{t.title}</span>
+                  <span className="m">
+                    {t.channel}
+                    {t.isLive ? (
+                      <span className="lv">{t.channel ? " · " : ""}● LIVE</span>
+                    ) : (
+                      ` · ${fmt(t.duration)}`
+                    )}
+                  </span>
                 </div>
-                <div className="c">
-                  {t.channel} · {t.isLive ? "LIVE" : fmt(t.duration)}
-                  {i === queue.currentIndex && <span className="np-tag"> · Now</span>}
+                <div className="act">
+                  <button
+                    className="ic"
+                    title="Remove"
+                    aria-label={`Remove ${t.title} from the queue`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (k === queue.currentIndex)
+                        invoke("player_stop").catch(() => {});
+                      dispatch({ type: "remove", index: k });
+                    }}
+                  >
+                    ×
+                  </button>
                 </div>
               </div>
-              <button
-                className="x"
-                title="Remove from queue"
-                aria-label={`Remove ${t.title} from queue`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (i === queue.currentIndex)
-                    invoke("player_stop").catch(() => {});
-                  dispatch({ type: "remove", index: i });
-                }}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </section>
+            ))}
+        </div>
+      )}
+
+      <div className="tabs" role="group" aria-label="View">
+        <button aria-pressed={view === "now"} onClick={() => setView("now")}>
+          NOW
+        </button>
+        <button
+          aria-pressed={view === "results"}
+          onClick={() => setView("results")}
+        >
+          RESULTS
+          <b className={searching ? "dim" : undefined}>{results?.length ?? 0}</b>
+        </button>
+        <button aria-pressed={view === "queue"} onClick={() => setView("queue")}>
+          QUEUE
+          <b>{queue.items.length}</b>
+        </button>
       </div>
 
-      <footer className="now">
-        <div className="np">
-          {current?.thumbnailUrl ? (
-            <img className="np-art" src={current.thumbnailUrl} alt="" />
-          ) : (
-            <div className="np-art">
-              {(current?.title ?? ps.title ?? "W").trim()[0]}
-            </div>
-          )}
-          <div className="np-meta">
-            <div className="np-title">
-              {current?.title ?? ps.title ?? "Wavesurf"}
-            </div>
-            {(current?.channel || ps.title) && (
-              <div className="np-channel">{current?.channel}</div>
-            )}
-            <div className="np-sub">
-              {ps.loading ? (
-                "loading…"
-              ) : isLive && ps.playing ? (
-                <span className="live">
-                  <span className="dot">●</span> LIVE
-                </span>
-              ) : current ? (
-                `${fmt(ps.position)} / ${fmt(ps.duration ?? current.duration)}`
-              ) : (
-                "paste a YouTube URL below"
-              )}
-            </div>
-            {ps.error && <div className="np-err">{ps.error.slice(0, 120)}</div>}
-          </div>
-        </div>
-        <div className="controls">
-          <div className="transport">
-            <button
-              className="step"
-              onClick={() => dispatch({ type: "prev" })}
-              aria-label="Previous"
-            >
-              ⏮
-            </button>
-            <button
-              className="play wide"
-              onClick={toggle}
-              aria-label={ps.paused || !ps.playing ? "Play" : "Pause"}
-            >
-              <LiquidPlayGlyph
-                glyph={ps.paused || !ps.playing ? "▶" : "⏸"}
-                repetition={6}
-              />
-            </button>
-            <button
-              className="step"
-              onClick={() => dispatch({ type: "next" })}
-              aria-label="Next"
-            >
-              ⏭
-            </button>
-            <button
-              className={`step repeat${repeatMode !== "off" ? " active" : ""}`}
-              title={
-                repeatMode === "off"
-                  ? "Repeat: off"
-                  : repeatMode === "all"
-                    ? "Repeat queue"
-                    : "Repeat one"
-              }
-              aria-label={
-                repeatMode === "off"
-                  ? "Repeat: off"
-                  : repeatMode === "all"
-                    ? "Repeat queue"
-                    : "Repeat one"
-              }
-              onClick={() => setRepeat(nextRepeatMode(repeatMode))}
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="16"
-                height="16"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z" />
-              </svg>
-              {repeatMode === "one" && <span className="one-badge">1</span>}
-            </button>
-          </div>
-          <div className="volgroup">
-            <button
-              className="volbtn"
-              title={ps.volume === 0 ? "Unmute" : "Mute"}
-              aria-label={ps.volume === 0 ? "Unmute" : "Mute"}
-              onClick={toggleMute}
-            >
-              {ps.volume === 0 ? "🔇" : "🔊"}
-            </button>
-            <input
-              className="vol"
-              type="range"
-              min={0}
-              max={100}
-              value={ps.volume}
-              onChange={(e) => vol(Number(e.target.value))}
-              onPointerUp={finishVolumeDrag}
-              onPointerCancel={finishVolumeDrag}
-              onBlur={finishVolumeDrag}
-            />
-          </div>
-        </div>
-        {/* While scrubbing, ALWAYS render the input (locally valued): a
-            mid-drag swap to the live/off branch cancels pointer capture and
-            "releases" the thumb. Scrubbing sends no commands, so no reload can
-            start under the drag; the single committed seek happens on release. */}
-        {isLive && ps.playing && seekDrag == null ? (
-          // Live indicator lives in the seekbar slot: same footprint as VOD
-          // progress, so live<->VOD switches never reshuffle the footer.
-          <div className="liveslot" aria-label="Live stream">
-            <div className="livebar">
-              <i />
-            </div>
-          </div>
-        ) : seekDrag != null || (!isLive && ps.seekable && ps.duration != null) ? (
-          <input
-            className="seekbar"
-            type="range"
-            min={0}
-            max={ps.duration ?? 0}
-            step={0.5}
-            value={seekDrag ?? (ps.position ?? 0)}
-            onPointerDown={() => {
-              seekDragRef.current = ps.position ?? 0;
-              setSeekDrag(ps.position ?? 0);
-            }}
-            onChange={(e) => {
-              const s = Number(e.target.value);
-              if (seekDragRef.current != null) {
-                // Scrub: local only, committed by onPointerUp.
-                seekDragRef.current = s;
-                setSeekDrag(s);
-              } else {
-                // Keyboard/no-pointer tweak: seek immediately.
-                setPs((p) => ({ ...p, position: s }));
-                invoke("player_seek", { seconds: s }).catch((e) =>
-                  setPs((p) => ({ ...p, error: String(e) })),
-                );
-              }
-            }}
-            onPointerUp={commitSeek}
-            onPointerCancel={commitSeek}
-            onBlur={commitSeek}
-          />
-        ) : (
-          <div className="seekbar off" />
-        )}
-        <form
-          className="row paste"
-          onSubmit={(e) => {
-            e.preventDefault();
-            addPastedUrl();
-          }}
-        >
-          <input
-            placeholder="🔗 Paste YouTube URL…"
-            value={url}
-            spellCheck={false}
-            onChange={(e) => setUrl(e.target.value)}
-          />
-          <button type="submit">＋</button>
-        </form>
-      </footer>
+      <div className="sb">
+        <span className={`m${err ? " bad" : ""}`} title={status}>
+          {status}
+        </span>
+        <span>SPACE · ←→ · N/P · M</span>
+      </div>
     </div>
   );
 }

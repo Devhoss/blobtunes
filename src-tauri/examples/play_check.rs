@@ -6,7 +6,7 @@
 //! Expected VOD:  `CONFIRMED VOD: dur=...` then `CONFIRMED SEEK: pos=...`
 //! Expected LIVE: `CONFIRMED LIVE` with no finite duration.
 
-use wavesurf_lib::ytdlp;
+use blobtunes_lib::ytdlp;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

@@ -196,7 +196,7 @@ fn now_playing<'a>(
     };
     let meta_title = meta.map(|m| m.title.as_str());
     let hint_title = hint.and_then(|h| h.title.as_deref());
-    let title = first(meta_title, hint_title, "Wavesurf");
+    let title = first(meta_title, hint_title, "Blobtunes");
     // Stable per-track id: the YouTube video id when known, else the title, so
     // the OS can tell "new track" from "metadata republished".
     let track_id = first(
@@ -207,7 +207,7 @@ fn now_playing<'a>(
     let artist = first(
         meta.map(|m| m.channel.as_str()),
         hint.and_then(|h| h.channel.as_deref()),
-        "Wavesurf",
+        "Blobtunes",
     );
     let artwork = meta
         .and_then(|m| m.thumbnail.as_deref())
@@ -667,7 +667,7 @@ fn run_core(
             if matches!(cmd, PlayerCmd::Shutdown) {
                 dbg(&log, "Shutdown received");
                 // Release the OS media session first: Windows (and Venu) must
-                // not keep a ghost "Wavesurf is playing" entry after the app is
+                // not keep a ghost "Blobtunes is playing" entry after the app is
                 // gone. detach() joins the SMTC thread; the Drop below is then a
                 // no-op.
                 if let Some(smtc) = smtc.as_ref() {
@@ -1282,7 +1282,7 @@ mod tests {
     fn an_empty_session_is_still_named_and_offers_no_skip() {
         let st = playing();
         let np = now_playing(&st, None, None, false);
-        assert_eq!(np.title, "Wavesurf");
+        assert_eq!(np.title, "Blobtunes");
         assert!(!np.title.is_empty(), "the OS widget needs a primary line");
         assert!(!np.can_next);
         assert!(!np.can_prev);

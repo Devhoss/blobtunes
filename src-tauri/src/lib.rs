@@ -113,7 +113,7 @@ pub fn run() {
             tray::setup(app)?;
             Ok(())
         })
-        .on_window_event(tray::intercept_close)
+        .on_window_event(tray::on_window_event)
         .invoke_handler(tauri::generate_handler![
             player_load,
             player_play,
@@ -130,5 +130,5 @@ pub fn run() {
             probe_url,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running wavesurf");
+        .expect("error while running Blobtunes");
 }

@@ -1,112 +1,178 @@
-:root{--bg:#080a0d;--card:#ffffff08;--line:#ffffff12;--fg:#eef1f4;--dim:#8b95a1;--accent:#c9d3dc;--chrome:linear-gradient(120deg,#f4f7fa,#9ba7b2 36%,#e7ecf1 62%,#85929e)}
+/* Blobtunes — the design's whole palette hangs off one hue (--h), set from
+   the current track's id. The window itself is the card: decorations:false
+   plus a transparent window means the rounded corners show the desktop.
+   Layout is the design's three views: NOW (the card), RESULTS and QUEUE, which
+   shrink the blob into a header and hand the rest of the window to a list. */
+:root{color-scheme:dark;box-sizing:border-box;
+--h:285;--bg:#0b0912;--panel:#14111d;--ink:#f4f0ff;--mute:#8c85a8;--line:#ffffff17;
+--a:hsl(var(--h) 95% 72%);--a2:hsl(calc(var(--h) + 60) 88% 58%);--dark:#150f26;
+--disp:'Unbounded','Trebuchet MS',Arial,sans-serif;--sans:'DM Sans','Helvetica Neue',Arial,sans-serif;--mono:'DM Mono',ui-monospace,Menlo,monospace;--bs:172px}
 *{box-sizing:border-box;margin:0}
-html,body,#root{height:100%;color:var(--fg);font:13px/1.4 "Segoe UI Variable",system-ui,sans-serif;overflow:hidden}
-body{background:radial-gradient(ellipse at 80% 0,#171d27,transparent 65%),var(--bg)}
-.app{display:flex;flex-direction:column;height:100%;padding:10px 12px;gap:8px;background:linear-gradient(160deg,#ffffff03,transparent);user-select:none}
-.titlebar{height:28px;flex-shrink:0;display:flex;align-items:center;gap:10px;padding:0 2px;cursor:grab}
-.titlebar:active{cursor:grabbing}
-.titlebar .dots{display:flex;gap:6px;align-items:center;cursor:default!important;-webkit-app-region:no-drag!important;user-select:none;position:relative;z-index:2;padding:6px 2px}
-.titlebar .dots span{display:block;width:9px;height:9px;border-radius:50%;background:#68727c;cursor:pointer!important;-webkit-app-region:no-drag!important}
-.titlebar .dots span:first-child{background:#d27b7b}
-.titlebar .dots span:nth-child(2){background:#bba473}
-.titlebar .appname{font-size:10px;font-weight:700;letter-spacing:2.4px;text-transform:uppercase;background:var(--chrome);background-clip:text;color:transparent}
-.row{display:flex;gap:6px;flex-shrink:0}
-input,button{font:inherit;color:inherit}
-input{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7px 10px;outline:none;width:100%}
-input::placeholder{color:#89939e}
-button{background:var(--card);border:1px solid var(--line);border-radius:9px;cursor:pointer;padding:6px 10px;transition:background .18s,border-color .18s}
-button:hover{border-color:#ffffff30;background:#ffffff0e}
-button:focus-visible,input:focus-visible{outline:2px solid #c9d3dc;outline-offset:2px}
-.search{flex:1;height:34px;font-size:12px}
-.row.top .clear{flex-shrink:0;width:34px;background:none;border-color:transparent;color:var(--dim);font-size:14px}
-.gear{width:30px;margin-left:auto;padding:3px;background:none;border-color:transparent}
-.keypanel{display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex-shrink:0}
-.keypanel input{flex:1;min-width:130px}
-.keypanel a{color:var(--dim);font-size:11px;text-decoration:underline}
-.shimrow{display:flex;gap:6px;align-items:center;color:var(--dim);font-size:11px;cursor:pointer}
-.shimrow input{width:auto;accent-color:var(--accent)}
-.error{color:#ffa0a0;font-size:11px;padding:5px 8px;background:#ff777710;border-radius:8px;overflow-wrap:anywhere}
-.lists{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:12px;min-height:0;padding-bottom:8px}
-.lists::-webkit-scrollbar{width:5px}
-.lists::-webkit-scrollbar-thumb{background:#ffffff20;border-radius:3px}
-h2{font-size:10px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:1.6px;margin:5px 6px 4px;display:flex;justify-content:space-between;align-items:center}
-h2 .mini{border:none;background:none;color:var(--dim);font-size:10px;padding:3px;cursor:pointer}
-.item{display:flex;gap:10px;align-items:center;padding:8px;border-radius:11px;cursor:pointer;border:1px solid transparent;position:relative}
-.item:hover{background:#ffffff07}
-.item img{width:38px;height:38px;border-radius:8px;object-fit:cover;background:var(--line);flex-shrink:0;border:1px solid var(--line)}
-.item .meta{flex:1;min-width:0}
-.item .t{font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.item .c{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
-.item .btns{display:flex;gap:3px}
-.item .btns button{padding:8px 9px;border-color:transparent;background:none}
-.item .x{border:none;background:none;color:var(--dim);padding:8px 9px;cursor:pointer}
-.item.on{background:#ffffff0b;border-color:#ffffff07}
-.item.on:before{content:"";position:absolute;left:0;top:24%;width:2px;height:52%;background:var(--chrome);border-radius:9px}
-.item.on .t{color:#f3f6f9}
-/* Active RESULT row: unmistakable vs hover. Accent rail + deeper card share
-   the LIVE pulse color (#ff8b8b) so "playing" has one color language.
-   Static marker only — nothing here animates, so reduced-motion needs nothing. */
-.results .item.on{background:#ffffff12;border-color:#ffffff17}
-.results .item.on:before{background:#ff8b8b}
-/* Shared active marker (results + queue): short enough to survive row
-   truncation — the full "Now playing" phrase ellipsized into "NOW PL…". */
-.item.on .np-tag{color:#ff8b8b;font-weight:700;font-size:10px;letter-spacing:.6px;text-transform:uppercase}
-.spin{color:var(--accent)}
-footer.now{border-top:1px solid var(--line);padding:10px 4px 0;display:flex;flex-direction:column;gap:8px;flex-shrink:0;background:linear-gradient(135deg,#a6bdd009,transparent 60%)}
-.np{display:flex;gap:12px;align-items:center}
-.np-art{width:46px;height:46px;border-radius:50%;object-fit:cover;background:conic-gradient(#dfe5ea,#65717d,#edf1f4,#66727d,#dfe5ea);border:3px solid #a8b4bf;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:18px;color:#eef1f4;box-shadow:0 5px 14px #0008;animation:disc-spin 22s linear infinite;animation-play-state:paused}
-.now.is-playing .np-art{animation-play-state:running}
-.np-meta{flex:1;min-width:0}
-.np-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.np-channel{color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.np-sub{color:var(--dim);font-size:10px;font-variant-numeric:tabular-nums}
-.np-err{color:#ffa0a0;font-size:11px;overflow-wrap:anywhere}
+html,body,#root{height:100%}
+body{background:transparent;font-family:var(--sans);color:var(--ink);overflow:hidden}
+/* Vertical scroll is the escape hatch for chrome the design has no room for
+   (the API-key panel) or a window dragged shorter than the design: nothing may
+   overlap, and everything has to stay reachable. Scrollbar stays hidden so the
+   card still reads as the design. */
+.win{height:100%;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;scrollbar-width:none;border:1px solid #ffffff26;border-radius:26px;
+background:linear-gradient(180deg,hsl(var(--h) 40% 16% / .9),var(--panel) 45%),radial-gradient(60% 50% at 50% 40%,hsl(var(--h) 80% 40% / .35),transparent 70%),radial-gradient(circle,#ffffff10 1px,transparent 1.5px) 0 0/22px 22px,var(--bg);
+box-shadow:inset 0 1px 0 #ffffff22;transition:background 1s}
+.tb{display:flex;align-items:center;gap:8px;padding:12px 14px 0;user-select:none}
+.tb .drag{flex:1;font:500 9px var(--mono);letter-spacing:.2em;color:var(--mute);height:22px;display:flex;align-items:center;cursor:grab}
+.tb .drag:active{cursor:grabbing}
+.tb button{width:22px;height:22px;border-radius:50%;border:0;cursor:pointer;background:#ffffff1c;color:var(--ink);font:700 10px var(--mono);display:grid;place-items:center;transition:.15s}
+.tb button:hover{background:var(--a);color:var(--dark);transform:scale(1.15) rotate(8deg)}
+.cmd{display:flex;align-items:center;gap:8px;margin:10px 14px 0;padding:5px 5px 5px 14px;background:#00000055;border:1px solid var(--line);border-radius:99px;transition:.2s;flex-shrink:0}
+.cmd:focus-within{border-color:var(--a);box-shadow:0 0 0 4px hsl(var(--h) 90% 60% / .2)}
+.cmd input{flex:1;min-width:0;border:0;outline:0;background:none;color:var(--ink);font:500 14px var(--sans)}
+.cmd input::placeholder{color:var(--mute)}
+.cmd button{border:0;border-radius:99px;background:var(--a);color:var(--dark);font:700 11px var(--disp);padding:8px 14px;cursor:pointer;transition:transform .12s}
+.cmd button:hover{transform:scale(1.06)}
+.cmd button:active{transform:scale(.92)}
+.cmd button:disabled{opacity:.4;cursor:default;transform:none}
+.err{color:#ffa0a0;font-size:11px;padding:5px 10px;background:#ff777710;border-radius:10px;overflow-wrap:anywhere;margin:8px 14px 0;flex-shrink:0}
+.keypanel{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 14px 0;padding:8px 10px;background:#00000055;border:1px solid var(--line);border-radius:14px;flex-shrink:0}
+.keypanel input{flex:1;min-width:110px;background:#00000066;border:1px solid var(--line);border-radius:99px;padding:6px 12px;color:var(--ink);font:500 11px var(--sans);outline:0}
+.keypanel button{border:0;border-radius:99px;background:var(--a);color:var(--dark);font:700 10px var(--disp);padding:6px 12px;cursor:pointer}
+.keypanel a{color:var(--mute);font-size:10px;text-decoration:underline}
+.shimrow{display:flex;gap:6px;align-items:center;color:var(--mute);font-size:10px;cursor:pointer;flex-basis:100%}
+.shimrow input{flex:none;width:auto;accent-color:var(--a)}
+.win::-webkit-scrollbar{display:none}
+/* Grows into spare height, but never shrinks below its content — the design's
+   window is exactly the design's content, so anything extra (an error, the key
+   panel) must push the card into a scroll rather than spill over the list. */
+.body{flex:1 0 auto;display:grid;grid-template-columns:1fr;grid-template-areas:"blob" "info" "seek" "ctl" "vol";grid-template-rows:auto auto auto auto auto;align-content:center;justify-items:center;padding:6px 18px 14px;row-gap:6px;min-height:0}
+canvas.blob{grid-area:blob;width:var(--bs);height:var(--bs);cursor:pointer;touch-action:manipulation;filter:drop-shadow(0 12px 22px hsl(var(--h) 90% 50% / .35))}
+.blob:focus-visible{outline:2px solid var(--a);outline-offset:6px;border-radius:50%}
+.info{grid-area:info;text-align:center;min-width:0;width:100%}
+h1{font:700 17px/1.2 var(--disp);letter-spacing:-.01em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.by{font:500 13px var(--sans);color:var(--mute);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seek{grid-area:seek;width:100%;margin-top:6px}
+.seek canvas{display:block;width:100%;height:28px;cursor:pointer;touch-action:none}
+.seek canvas:focus-visible{outline:2px solid var(--a);outline-offset:3px}
+.times{display:flex;justify-content:space-between;font:500 11px var(--mono);color:var(--mute)}
 .live{color:#ff8b8b;font-weight:700;letter-spacing:1px;font-size:10px}
 .live .dot{animation:blink 1.6s infinite}
-.livebar{height:2px;border-radius:2px;background:var(--line);position:relative;overflow:hidden}
-.livebar i{position:absolute;top:0;bottom:0;width:34%;background:#ff8b8b;border-radius:2px;animation:slide 2.2s ease-in-out infinite}
-/* Live shimmer rides in the seekbar slot: same 18px footprint as VOD
-   progress, so the footer never reshuffles on live<->VOD switches. */
-.liveslot{height:18px;display:flex;align-items:center}
-.liveslot .livebar{flex:1}
-/* Transport spans the full row: step coins flank a wide play bar that soaks
-   up the old empty spacer, volume docked right. */
-.controls{display:flex;align-items:center;gap:10px;flex-shrink:0}
-.controls .transport{flex:1;display:flex;align-items:center;justify-content:center;gap:10px;min-width:0}
-.controls .volgroup{flex-shrink:0;display:flex;align-items:center;gap:8px}
-/* Step coins: static metal whisper — same family as the play jewel, frozen
-   and dimmer so the live shader keeps the hierarchy. */
-.controls .transport .step{width:34px;height:34px;padding:0;flex-shrink:0;border-radius:50%;background:linear-gradient(160deg,#2b323a,#14181d);border:1px solid #ffffff12;color:#c7d0d9;box-shadow:inset 0 1px 1px #ffffff1f,0 3px 8px #0007}
-.controls .transport .step:hover{color:#fff;border-color:#ffffff26}
-.controls .transport .step.repeat.active{color:#ff8b8b;border-color:#ff8b8b66;background:linear-gradient(160deg,#3a2b2e,#1b1416)}
-.controls .transport .step.repeat{position:relative;display:flex;align-items:center;justify-content:center}
-.controls .transport .step.repeat .one-badge{position:absolute;top:-3px;right:-3px;min-width:14px;height:14px;border-radius:8px;background:#ff8b8b;color:#141114;font-size:9px;font-weight:700;line-height:14px;text-align:center;padding:0 3px}
-.controls button{background:none;border:none;font-size:16px;cursor:pointer;min-width:32px;min-height:32px;padding:4px;color:#bac5cf}
-.controls button:hover{color:#fff}
-/* Liquid-metal play jewel (paper-design shader): shader ring, dark core to
-   match the near-black contract, light glyph. The shader replaces the old
-   CSS conic sheen, so lm-swirl is gone. WebGL failure falls back to the
-   dark core + glyph via the boundary in LiquidPlay.tsx. */
-.controls .play{width:42px;height:42px;border-radius:50%;padding:0;position:relative;display:flex;align-items:center;justify-content:center;background:transparent;overflow:hidden;border:none;box-shadow:0 6px 18px #0009}
-.controls .play .lm-shader{position:absolute;inset:0;display:block}
-.controls .play .lm-shader canvas{width:100%!important;height:100%!important;display:block}
-.controls .play .lm-core{position:absolute;inset:5px;border-radius:50%;background:radial-gradient(circle at 35% 30%,#161b22,#0a0d11 70%);box-shadow:inset 0 1px 2px #ffffff26,inset 0 -2px 5px #000000c8}
-.controls .play .lm-glyph{position:relative;color:#eef1f4;font-size:14px;line-height:1}
-/* Wide play bar: same jewel, stretched — pill core follows the bar.
-   Capped: uncapped flex turns into a trough on wide windows.
-   Slim + short on purpose: the repeat coin shares this row. */
-.controls .transport .play.wide{flex:1 1 auto;width:auto;max-width:96px;height:36px;border-radius:12px}
-.controls .transport .play.wide .lm-core{inset:2px 4px;border-radius:9px}
-.controls .play:hover{filter:brightness(1.1)}
-.controls .play:active{transform:scale(.96)}
-.controls .vol{width:64px;padding:0}
-.controls .volbtn{font-size:14px;min-width:28px}
-.seekbar,.vol{accent-color:var(--accent)}
-.seekbar{width:100%;height:18px;padding:0;border:none;background:transparent}
-.seekbar.off{text-align:center;color:var(--dim);font-size:10px;height:14px}
-.paste input{flex:1;min-width:0;height:30px;font-size:11px}
-.paste button{color:var(--accent);width:32px;height:30px;padding:3px;flex-shrink:0}
-@keyframes disc-spin{to{transform:rotate(360deg)}}
+/* The trio is centred by the row itself; the repeat coin is taken out of that
+   flow and pinned right, so it can never shift the play pill off the card's
+   centre line (which is also the volume slider's). Margins, not transform, do
+   its vertical centring — .b:hover already owns transform. */
+.ctl{grid-area:ctl;position:relative;display:flex;align-items:center;justify-content:center;width:100%;margin-top:4px}
+.transport{display:flex;align-items:center;gap:14px}
+.ctl > .b.repeat{position:absolute;right:0;top:0;bottom:0;margin:auto 0}
+.b{width:46px;height:46px;border:1px solid var(--line);border-radius:50%;background:#ffffff0f;color:var(--ink);cursor:pointer;display:grid;place-items:center;position:relative;transition:transform .15s cubic-bezier(.3,1.6,.5,1),background .15s}
+.b svg{width:16px;height:16px;fill:currentColor}
+.b:hover{background:#ffffff26;transform:translateY(-3px) rotate(-6deg)}
+.b:active{transform:scale(.85)}
+.b.go{width:78px;height:56px;border-radius:28px;border:0;background:linear-gradient(135deg,var(--a),var(--a2));color:var(--dark);box-shadow:0 8px 24px -6px hsl(var(--h) 90% 55% / .7)}
+.b.go svg{width:22px;height:22px}
+.b.go:hover{transform:translateY(-3px) scale(1.06) rotate(0)}
+.b.go:active{transform:scale(.88,.94)}
+.b.repeat{width:40px;height:40px}
+.b.repeat.on{color:#ff8b8b;border-color:#ff8b8b66;background:linear-gradient(160deg,#3a2b2e,#1b1416)}
+.b.repeat .one{position:absolute;top:-2px;right:-2px;min-width:15px;height:15px;border-radius:8px;background:#ff8b8b;color:#141114;font:700 9px var(--mono);line-height:15px;text-align:center;padding:0 3px}
+.vol{grid-area:vol;display:flex;align-items:center;gap:10px;width:70%;font:500 10px var(--mono);letter-spacing:.14em;color:var(--mute);margin-top:4px}
+.volbtn{display:flex;align-items:center;gap:5px;border:0;background:none;padding:0;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer}
+.volbtn:hover{color:var(--ink)}
+.volbtn.off{color:#ff8b8b}
+input[type=range]{-webkit-appearance:none;appearance:none;flex:1;height:18px;background:none;cursor:pointer}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:9px;background:linear-gradient(90deg,var(--a) var(--v,70%),#ffffff1f var(--v,70%))}
+input[type=range]::-moz-range-track{height:6px;border-radius:9px;background:#ffffff1f}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;margin-top:-5px;border-radius:50%;background:#fff;border:3px solid var(--a2)}
+input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;background:#fff;border:3px solid var(--a2)}
+/* ---------------------------------------------------------------------------
+   RESULTS / QUEUE: the blob shrinks into a header (title, transport, seek) and
+   the list takes the rest of the window.
+   --------------------------------------------------------------------------- */
+.dense{--bs:64px}
+/* grid-template-rows must be restated: inheriting the NOW rule's five tracks
+   leaves an empty fifth track whose row-gap pushes the list 6px short. */
+.dense .body{flex:none;grid-template-columns:auto 1fr;grid-template-rows:auto auto auto auto;grid-template-areas:"blob info" "blob ctl" "seek seek" "vol vol";justify-items:start;align-items:center;column-gap:12px;padding-bottom:10px}
+.dense .info{text-align:left}
+.dense h1{font-size:13px;-webkit-line-clamp:1}
+.dense .by{display:none}
+.dense .b{width:34px;height:34px}
+.dense .b.go{width:52px;height:38px;border-radius:19px}
+.dense .b.go svg{width:16px;height:16px}
+.dense .b.repeat{width:34px;height:34px}
+.dense .b.repeat .one{min-width:12px;height:12px;line-height:12px;font-size:8px}
+.dense .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto}
+.dense .transport{gap:8px}
+.dense .ctl > .b.repeat{position:static;margin:0}
+/* The design hides the "VOL" label here (two full-width sliders stack, which is
+   exactly why we keep it) — and in this app that label is also the mute toggle. */
+.dense .vol{width:100%;margin:0}
+.list{flex:1;min-height:0;overflow-y:auto;border-top:1px solid var(--line);padding:2px 8px 6px;scrollbar-width:thin;scrollbar-color:#ffffff30 transparent}
+.list::-webkit-scrollbar{width:8px}
+.list::-webkit-scrollbar-thumb{background:#ffffff30;border-radius:4px}
+.list::-webkit-scrollbar-track{background:transparent}
+.lh{display:flex;justify-content:space-between;align-items:center;font:500 10px var(--mono);letter-spacing:.14em;color:var(--mute);padding:10px 8px 6px}
+.lh > span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:10px}
+.lh-right{display:flex;align-items:center;gap:8px;white-space:nowrap}
+.lh .clr{border:0;background:none;color:var(--mute);font:inherit;letter-spacing:inherit;cursor:pointer;padding:0;text-decoration:underline}
+.lh .clr:hover{color:var(--a)}
+.row{display:grid;grid-template-columns:44px 1fr auto;gap:10px;align-items:center;padding:6px 8px;border-radius:14px;color:var(--ink);cursor:pointer;transition:background .15s}
+.row:hover{background:#ffffff10}
+.row:focus-visible{outline:2px solid var(--a);outline-offset:-2px}
+.row .t{width:44px;height:44px;border-radius:12px;position:relative;overflow:hidden;background-size:cover;background-position:center;background-repeat:no-repeat}
+.row .t::after{content:"";position:absolute;inset:0;background:radial-gradient(circle at 75% 25%,#fff5 0 10%,transparent 11%),radial-gradient(circle at 25% 80%,#0004 0 22%,transparent 23%)}
+.tx{min-width:0}
+.row .n{display:block;font:700 13px var(--sans);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row .m{display:block;margin-top:3px;font:500 10px var(--mono);color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lv{color:#ff6b7d}
+.row.cur{background:hsl(var(--h) 60% 50% / .2)}
+.row.cur .n{color:var(--a)}
+.act{display:flex;gap:8px;align-items:center}
+.ic{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:#ffffff0d;color:var(--mute);display:grid;place-items:center;font:700 14px var(--mono);cursor:pointer;transition:.15s;font-style:normal}
+.row:hover .ic,.ic:focus-visible{background:var(--a);color:var(--dark);border-color:transparent}
+.ic:active{transform:scale(.85)}
+.kb{font:500 9px var(--mono);border:1px solid var(--a);color:var(--a);border-radius:5px;padding:2px 6px}
+.empty{text-align:center;color:var(--mute);font:500 12px var(--sans);padding:26px 10px}
+.sr{display:grid;grid-template-columns:44px 1fr;gap:10px;padding:6px 8px}
+.sr span{display:grid;gap:8px;align-content:center}
+.sr i,.sr b{display:block;border-radius:10px;background:linear-gradient(90deg,#ffffff0d 25%,#ffffff22 50%,#ffffff0d 75%);background-size:200% 100%;animation:sh 1.2s linear infinite}
+.sr i{height:44px;border-radius:12px}
+.sr b{height:10px;width:80%}
+.sr b+b{width:45%}
+.dim,.pulse{animation:dim .8s ease-in-out infinite alternate}
+.tabs{display:flex;gap:4px;padding:6px 10px;border-top:1px solid var(--line);flex-shrink:0}
+.tabs button{flex:1;border:0;border-radius:99px;padding:7px 0;background:none;color:var(--mute);font:500 10px var(--mono);letter-spacing:.12em;cursor:pointer;transition:.15s}
+.tabs button:hover{color:var(--ink)}
+.tabs button[aria-pressed=true]{background:var(--a);color:var(--dark)}
+.tabs b{font-weight:500;opacity:.7;margin-left:5px}
+.sb{padding:9px 16px;border-top:1px solid var(--line);font:500 10px var(--mono);color:var(--mute);display:flex;justify-content:space-between;gap:10px;background:#0000003a;flex-shrink:0}
+.sb .m{color:var(--a);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sb .m.bad{color:#ffa0a0}
+.sb span:last-child{white-space:nowrap}
+.mini{--bs:64px}
+.mini .cmd,.mini .list,.mini .sb,.mini .tabs,.mini .vol,.mini .by,.mini .err{display:none}
+.mini .body{flex:none;grid-template-columns:auto 1fr;grid-template-areas:"blob info" "blob ctl" "seek seek";grid-template-rows:auto auto auto;justify-items:start;align-items:center;column-gap:12px;padding-bottom:12px}
+.mini .info{text-align:left}
+.mini h1{font-size:12px;-webkit-line-clamp:1}
+.mini .b{width:34px;height:34px}
+.mini .b.repeat{width:34px;height:34px}
+.mini .b.go{width:52px;height:38px;border-radius:19px}
+.mini .b.go svg{width:16px;height:16px}
+.mini .b.repeat .one{min-width:12px;height:12px;line-height:12px;font-size:8px}
+.mini .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto}
+.mini .transport{gap:8px}
+.mini .ctl > .b.repeat{position:static;margin:0}
+/* Narrower than the design: shrink the transport so the pinned repeat coin and
+   the centred trio never touch. Reachable by resizing (min 340) and by fallback
+   font metrics, not by display scaling — the window is pinned in CSS px. */
+@media(max-width:340px){
+.b{width:40px;height:40px}
+.b.go{width:66px;height:50px;border-radius:25px}
+.b.go svg{width:18px;height:18px}
+.ctl > .b.repeat{margin:auto 0}
+}
+button:focus-visible,input:focus-visible{outline:2px solid var(--a);outline-offset:3px}
+/* The command pill IS the search box: focusing it already lights the pill's own
+   border and glow (.cmd:focus-within), and the input's default square outline
+   drew a second box inside it. Keyboard users still get the highlight. */
+.cmd input:focus-visible{outline:0}
+@keyframes bob{to{transform:translateY(-4px)}}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
-@keyframes slide{0%{left:-34%}100%{left:100%}}
+@keyframes dim{to{opacity:.25}}
+@keyframes sh{to{background-position:-200% 0}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}

@@ -1,7 +1,10 @@
 [package]
-name = "wavesurf"
+# The binary is named after this package: blobtunes.exe. The app IDENTIFIER
+# (com.hoss.wavesurf) is intentionally left alone in tauri.conf.json so the
+# saved API key and the WebView2 profile survive the rename.
+name = "blobtunes"
 version = "0.1.0"
-description = "A Tauri App"
+description = "Blobtunes — compact YouTube player"
 authors = ["you"]
 edition = "2021"
 
@@ -11,7 +14,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "wavesurf_lib"
+name = "blobtunes_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

@@ -41,3 +41,6 @@ app-icon.jpg
 .env
 .env.*
 !.env.example
+
+# visual-check harness output
+tools/shots/

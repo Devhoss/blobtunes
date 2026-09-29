@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Wavesurf",
+  "productName": "Blobtunes",
   "version": "0.1.0",
   "identifier": "com.hoss.wavesurf",
   "build": {
@@ -13,18 +13,18 @@
     "windows": [
       {
         "label": "main",
-        "title": "Wavesurf",
-        "width": 380,
-        "height": 560,
-        "minWidth": 320,
-        "minHeight": 480,
+        "title": "Blobtunes",
+        "width": 390,
+        "height": 600,
+        "minWidth": 340,
+        "minHeight": 520,
         "resizable": true,
         "decorations": false,
-        "transparent": false
+        "transparent": true
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://i.ytimg.com; connect-src ipc: http://ipc.localhost; media-src 'self'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https://i.ytimg.com; connect-src ipc: http://ipc.localhost; media-src 'self'"
     }
   },
   "bundle": {

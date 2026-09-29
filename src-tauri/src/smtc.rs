@@ -34,7 +34,7 @@
 //!   compiles to a no-op.
 //! * The session exists only while something is loaded: it is created on the
 //!   first track and released again when the player stops, so nothing lingers
-//!   in Windows/Venu while Wavesurf is idle. A natural end of a track is NOT a
+//!   in Windows/Venu while Blobtunes is idle. A natural end of a track is NOT a
 //!   stop — the finished track stays visible (and replayable from the OS).
 //!
 //! The WinRT/SMTC layer itself is `playwire` (a maintained cross-platform
@@ -202,7 +202,7 @@ mod win {
             delta < 0.0 || delta >= POSITION_PUBLISH_INTERVAL
         }
 
-        /// The `playwire` snapshot: the only place in Wavesurf that knows what
+        /// The `playwire` snapshot: the only place in Blobtunes that knows what
         /// SMTC looks like.
         fn to_playwire(&self) -> PlaybackState {
             let track = self.has_track.then(|| Track {
@@ -323,7 +323,7 @@ mod win {
         // windows-rs, whose factory path falls back to `CoIncrementMTAUsage` on
         // a thread that has no apartment, and SMTC's objects are agile.
         let event_log = Arc::clone(log);
-        MediaControls::new(PlayerConfig::new("Wavesurf").hwnd(hwnd), move |event| {
+        MediaControls::new(PlayerConfig::new("Blobtunes").hwnd(hwnd), move |event| {
             // Called on a WinRT thread-pool thread: hand the command straight to
             // the player and return. Never block, never touch player state.
             let cmd = match event {
@@ -355,7 +355,7 @@ mod win {
     fn worker(rx: Receiver<Request>, hwnd: u64, sink: Arc<dyn CommandSink>, log: Arc<Mutex<File>>) {
         dbg(&log, "smtc worker up");
         // Created on the first publish that has something to show, so an idle
-        // Wavesurf never registers an empty media session.
+        // Blobtunes never registers an empty media session.
         let mut controls: Option<MediaControls> = None;
         let mut unavailable = false;
         // Latest published position, for resolving relative seeks.

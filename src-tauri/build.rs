@@ -3,7 +3,7 @@ use std::path::PathBuf;
 fn main() {
     tauri_build::build();
 
-    // Wavesurf: libmpv link setup.
+    // Blobtunes: libmpv link setup.
     // libmpv2-sys only emits `cargo:rustc-link-lib=mpv`, so WE must put a
     // compatible `mpv.lib` on the native search path. The shinchiro mpv-dev
     // archive ships a MinGW import lib (`libmpv.dll.a`); rust-lld (our linker —
