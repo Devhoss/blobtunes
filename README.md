@@ -72,6 +72,13 @@ cargo test -- --ignored             # + live network tests (yt-dlp, API key for 
 npm run tauri build    # installer (needs src-tauri/bin/libmpv-2.dll — see tools/)
 ```
 
+> **Never ship a bare `cargo build --release` binary.** Only the Tauri CLI
+> enables the `custom-protocol` feature; without it `generate_context!` embeds
+> no frontend assets and the webview falls back to `build.devUrl`
+> (`http://localhost:1420`), so the exe shows `ERR_CONNECTION_REFUSED` unless a
+> Vite dev server happens to be up. `npm run tauri build` is the only release
+> path.
+
 First-time setup on a fresh machine:
 
 ```powershell
