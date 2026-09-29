@@ -29,6 +29,7 @@ src-tauri/bin/
 portable/
 
 # agent scratch / session plans
+.freebuff/
 .zcode/
 
 # design scratch (local only — not in the public repo)
