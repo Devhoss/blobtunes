@@ -53,13 +53,18 @@ h1{font:700 17px/1.2 var(--disp);letter-spacing:-.01em;display:-webkit-box;-webk
 .times{display:flex;justify-content:space-between;font:500 11px var(--mono);color:var(--mute)}
 .live{color:#ff8b8b;font-weight:700;letter-spacing:1px;font-size:10px}
 .live .dot{animation:blink 1.6s infinite}
-/* The trio is centred by the row itself; the repeat coin is taken out of that
-   flow and pinned right, so it can never shift the play pill off the card's
-   centre line (which is also the volume slider's). Margins, not transform, do
-   its vertical centring — .b:hover already owns transform. */
-.ctl{grid-area:ctl;position:relative;display:flex;align-items:center;justify-content:center;width:100%;margin-top:4px}
+/* The repeat coin rides IN the row beside Next, as in the design. Centring
+   four buttons as-is puts the play pill 27px off the centre line — the app's
+   very first bug report — so the row is centred as trio+phantom: padding-left
+   of coin+gap (54px) balances the coin on the right and lands the pill on the
+   card's centre line. The children never shrink: letting flexbox shave the
+   coin breaks the phantom's arithmetic, and min-width:0 keeps the padding
+   out of the grid column's min-content floor (which shoved every centred row
+   sideways in narrow windows). Below the 340px minimum the row overflows
+   symmetrically, so the pill is still the centre of the card. */
+.ctl{grid-area:ctl;display:flex;align-items:center;justify-content:center;gap:14px;width:100%;min-width:0;margin-top:4px;padding-left:54px}
+.ctl > *{flex-shrink:0}
 .transport{display:flex;align-items:center;gap:14px}
-.ctl > .b.repeat{position:absolute;right:0;top:0;bottom:0;margin:auto 0}
 .b{width:46px;height:46px;border:1px solid var(--line);border-radius:50%;background:#ffffff0f;color:var(--ink);cursor:pointer;display:grid;place-items:center;position:relative;transition:transform .15s cubic-bezier(.3,1.6,.5,1),background .15s}
 .b svg{width:16px;height:16px;fill:currentColor}
 .b:hover{background:#ffffff26;transform:translateY(-3px) rotate(-6deg)}
@@ -69,8 +74,9 @@ h1{font:700 17px/1.2 var(--disp);letter-spacing:-.01em;display:-webkit-box;-webk
 .b.go:hover{transform:translateY(-3px) scale(1.06) rotate(0)}
 .b.go:active{transform:scale(.88,.94)}
 .b.repeat{width:40px;height:40px}
-.b.repeat.on{color:#ff8b8b;border-color:#ff8b8b66;background:linear-gradient(160deg,#3a2b2e,#1b1416)}
-.b.repeat .one{position:absolute;top:-2px;right:-2px;min-width:15px;height:15px;border-radius:8px;background:#ff8b8b;color:#141114;font:700 9px var(--mono);line-height:15px;text-align:center;padding:0 3px}
+.b.repeat.on{color:var(--a);border-color:var(--a);background:hsl(var(--h) 60% 50% / .18)}
+/* The "1" inherits the accent like the design's; no red pill. */
+.b.repeat .one{position:absolute;right:5px;bottom:3px;font:500 9px var(--mono);font-style:normal;line-height:1;color:inherit}
 .vol{grid-area:vol;display:flex;align-items:center;gap:10px;width:70%;font:500 10px var(--mono);letter-spacing:.14em;color:var(--mute);margin-top:4px}
 .volbtn{display:flex;align-items:center;gap:5px;border:0;background:none;padding:0;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer}
 .volbtn:hover{color:var(--ink)}
@@ -95,10 +101,9 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;bac
 .dense .b.go{width:52px;height:38px;border-radius:19px}
 .dense .b.go svg{width:16px;height:16px}
 .dense .b.repeat{width:34px;height:34px}
-.dense .b.repeat .one{min-width:12px;height:12px;line-height:12px;font-size:8px}
-.dense .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto}
+.dense .b.repeat .one{font-size:8px}
+.dense .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto;padding-left:0}
 .dense .transport{gap:8px}
-.dense .ctl > .b.repeat{position:static;margin:0}
 /* The design hides the "VOL" label here (two full-width sliders stack, which is
    exactly why we keep it) — and in this app that label is also the mute toggle. */
 .dense .vol{width:100%;margin:0}
@@ -153,18 +158,16 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;bac
 .mini .b.repeat{width:34px;height:34px}
 .mini .b.go{width:52px;height:38px;border-radius:19px}
 .mini .b.go svg{width:16px;height:16px}
-.mini .b.repeat .one{min-width:12px;height:12px;line-height:12px;font-size:8px}
-.mini .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto}
+.mini .b.repeat .one{font-size:8px}
+.mini .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto;padding-left:0}
 .mini .transport{gap:8px}
-.mini .ctl > .b.repeat{position:static;margin:0}
-/* Narrower than the design: shrink the transport so the pinned repeat coin and
-   the centred trio never touch. Reachable by resizing (min 340) and by fallback
-   font metrics, not by display scaling — the window is pinned in CSS px. */
+/* Narrower than the design: shrink the transport so the coin beside Next and
+   the centred trio never touch. Reachable by resizing (min 340) and by
+   fallback font metrics, not by display scaling — the window is pinned in CSS px. */
 @media(max-width:340px){
 .b{width:40px;height:40px}
 .b.go{width:66px;height:50px;border-radius:25px}
 .b.go svg{width:18px;height:18px}
-.ctl > .b.repeat{margin:auto 0}
 }
 button:focus-visible,input:focus-visible{outline:2px solid var(--a);outline-offset:3px}
 /* The command pill IS the search box: focusing it already lights the pill's own

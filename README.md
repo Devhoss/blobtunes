@@ -1,17 +1,49 @@
 # Blobtunes
 
+<p align="center">
+  <img src="assets/blob.svg" alt="The Blobtunes mascot" width="220">
+</p>
+
 Audio-only YouTube player for Windows. Paste a link (or search), hear music —
 no browser, no video, nothing written to disk.
 
 ![MIT](https://img.shields.io/badge/license-MIT-green)
+![mascot: CC BY-NC-ND](https://img.shields.io/badge/mascot-CC%20BY--NC--ND%204.0-blue)
+
+> The blob is the app's face and stays that way: the **code is MIT**, but the
+> **mascot character is not** — use, run and share the app freely; don't sell
+> or remix the character itself. See [BLOB-LICENSE.txt](BLOB-LICENSE.txt).
 
 ## What it is
 
 Tauri v2 + React shell around a Rust-owned **libmpv** instance. YouTube
 resolution comes from the user's own **yt-dlp** (never bundled); live HLS
 plays natively; VOD uses a two-tier URL strategy (best dash first, android
-progressive fallback on failure). See the rev-2 plan for the full story,
-including the range-gated-edge findings that shaped this design.
+progressive fallback on failure). The playback story lives in the Rust module
+docs (`src-tauri/src/*.rs`), including the range-gated-edge findings that
+shaped this design.
+
+## The player
+
+The UI is a port of the **Blobtunes** design: one 390x600 card (the window
+itself, decorations off) with three views — **NOW** (the blob), **RESULTS**
+and **QUEUE** — the blob shrinking into a dense header when a list is open.
+Every track tints the whole card with its own hue (FNV-1a of the video id),
+and mini mode shrinks the real window to 390x206.
+
+The design artifact is the spec, and a harness keeps the port honest:
+
+```bash
+npm run dev                       # app on :1420
+node tools/visual-check.cjs       # artifact vs app, computed-style diff
+```
+
+`tools/visual-check.cjs` renders the artifact and the app side by side in
+Chromium, compares every element the design pins down, and exercises the
+centring/scroll/fit invariants that regress silently. `tools/window-probe.ps1`
+reads the *real* window's client rect (DPI-aware, so 125% displays don't lie).
+The artifact itself lives outside the repo (gitignored) — point
+`BLOBTUNES_BASELINE` at it if you move it.
 
 ## Prerequisites
 
@@ -58,7 +90,7 @@ Measured on this machine (Windows 11, idle desktop):
 | live playing | _tbd_ | — |
 
 Target claim only: substantially lower than a browser tab rendering video.
-Fill this table in during release testing (`Task 10`).
+Fill this table in during release testing.
 
 ## Windows media session (SMTC)
 
@@ -103,8 +135,18 @@ WebView2 host.
 - Search needs an API key; quota is real (~100 searches/day free).
 - Settings → *Media-key fallback (SMTC shim)* is obsolete: the player now
   publishes a native Windows media session (see above), so leave the shim off.
+- Search titles arrive as clean UTF-8 (a byte-vs-character bug used to mangle
+  emoji and non-ASCII titles; fixed with a regression test).
 - Tray Quit is the only full exit; window ✕ hides to tray by design.
+- The app identifier (`com.hoss.wavesurf`) and the `wavesurf.json` key file
+  are intentionally not renamed: they key the saved API key and the WebView2
+  profile, and renaming them would silently drop both.
+- Debug thread names and log paths still say `wavesurf` (threads in
+  `player.rs`/`smtc.rs`, `E:/dev/wavesurf/*.log`): cosmetic or
+  machine-local, deliberately left alone.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Code: MIT — see [LICENSE](LICENSE).
+The mascot character: [CC BY-NC-ND 4.0](BLOB-LICENSE.txt) — free to use and
+share as part of the app, not to sell or modify on its own.

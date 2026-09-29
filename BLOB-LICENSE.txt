@@ -1,0 +1,50 @@
+Creative Commons Licensing Notice
+for the Blobtunes mascot ("the Blob")
+
+Copyright (c) 2026 Hoss (Operation Winter)
+
+The Blobtunes mascot — the blob character shown at the top of this
+repository's README and distributed in the icon set (assets/blob.svg,
+src-tauri/icons/blobtunes-icon.svg and every PNG/ICO/ICNS generated from it) —
+is NOT covered by the MIT license that governs the rest of this repository.
+
+The Blob character is licensed to everyone under:
+
+    Creative Commons Attribution-NonCommercial-NoDerivatives 4.0
+    International (CC BY-NC-ND 4.0)
+    https://creativecommons.org/licenses/by-nc-nd/4.0/
+
+In plain terms:
+
+  YOU MAY
+  - Use the Blob as it appears in the Blobtunes application, unmodified,
+    for any personal, non-commercial purpose.
+  - Run, study and redistribute the Blobtunes application itself under the
+    terms of its MIT license, which includes the icon files as part of the
+    application.
+  - Share verbatim copies of the character art with attribution, for
+    non-commercial purposes.
+
+  YOU MAY NOT, WITHOUT A SEPARATE WRITTEN LICENSE FROM THE AUTHOR
+  - Sell the character art itself, in any form, standalone or as part of
+    another product.
+  - Release, distribute or publish modified versions, derivatives, remixes
+    or re-renderings of the character.
+  - Use the character commercially: merchandising, branding for another
+    product, paid wallpapers or assets packs, NFTs, or any other
+    monetisation of the artwork itself.
+
+  Using the Blobtunes APPLICATION in a commercial setting (for example
+  playing music in a cafe) is a question of the application's MIT license
+  and YouTube's terms of service, not of this notice — the character is
+  only off-limits as ARTWORK to reuse or sell.
+
+Attribution, when sharing the character or the application:
+    "Blob" character (c) 2026 Hoss (Operation Winter) — CC BY-NC-ND 4.0
+
+The MIT license in LICENSE covers everything else in this repository,
+including all source code and the generated application icon files when
+distributed as part of the application.
+
+Full legal text of the CC BY-NC-ND 4.0 license:
+    https://creativecommons.org/licenses/by-nc-nd/4.0/legalcode
