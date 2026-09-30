@@ -64,7 +64,7 @@ Search costs ~100 quota units per query; the app debounces (400ms) and caches
 ## Run / build
 
 ```bash
-cd E:\dev\wavesurf
+cd E:\dev\blobtunes
 npm run tauri dev      # hot-reload dev
 npm test               # vitest (frontend)
 cd src-tauri && cargo test          # rust units
@@ -145,12 +145,14 @@ WebView2 host.
 - Search titles arrive as clean UTF-8 (a byte-vs-character bug used to mangle
   emoji and non-ASCII titles; fixed with a regression test).
 - Tray Quit is the only full exit; window ✕ hides to tray by design.
-- The app identifier (`com.hoss.wavesurf`) and the `wavesurf.json` key file
-  are intentionally not renamed: they key the saved API key and the WebView2
-  profile, and renaming them would silently drop both.
-- Debug thread names and log paths still say `wavesurf` (threads in
-  `player.rs`/`smtc.rs`, `E:/dev/wavesurf/*.log`): cosmetic or
-  machine-local, deliberately left alone.
+- The app identifier (`com.hoss.wavesurf`) and the on-disk key-file *identity*
+  are intentionally kept: the identifier keys the WebView2 profile folder and
+  the app config dir, so changing it would silently drop saved data. (The key
+  file itself now lives at `blobtunes.json`; `load_api_key` migrates a legacy
+  `wavesurf.json` once on first run.)
+- Debug thread names and log paths were renamed to `blobtunes` (2026-10-01);
+  mpv/player debug logs now write to `E:/dev/blobtunes/*.log` (temp-dir
+  fallback unchanged).
 
 ## License
 

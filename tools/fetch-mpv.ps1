@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$dir = "E:\dev\wavesurf\tools\mpv"
+$dir = Join-Path $PSScriptRoot "mpv"  # repo-relative: survives folder moves/renames
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 # Pinned known-good shinchiro build (SourceForge mpv-player-windows/files/libmpv/).
 # NOTE: Invoke-WebRequest on the /download page returns HTML — use the direct

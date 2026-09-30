@@ -25,7 +25,7 @@ fn main() {
         init.set_option("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")?;
         // Debug harness: always keep mpv's own log next to the run log.
         init.set_option("msg-level", "all=v")?;
-        init.set_option("log-file", "E:/dev/wavesurf/playcheck-mpv.log")?;
+        init.set_option("log-file", "E:/dev/blobtunes/playcheck-mpv.log")?;
         Ok(())
     })
     .expect("mpv init");

@@ -7,7 +7,7 @@
 # webview's devicePixelRatio were 1.
 #
 #   powershell -ExecutionPolicy Bypass -File tools/window-probe.ps1
-#   powershell -ExecutionPolicy Bypass -File tools/window-probe.ps1 -Name wavesurf
+#   powershell -ExecutionPolicy Bypass -File tools/window-probe.ps1 -Name blobtunes
 #   powershell -ExecutionPolicy Bypass -File tools/window-probe.ps1 -Shot tools/shots/real-app.png
 param([string]$Name = "Blobtunes", [string]$Shot = "")
 

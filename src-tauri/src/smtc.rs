@@ -254,7 +254,7 @@ mod win {
             let (tx, rx) = channel::<Request>();
             let worker_log = Arc::clone(&log);
             let handle = thread::Builder::new()
-                .name("wavesurf-smtc".into())
+                .name("blobtunes-smtc".into())
                 .spawn(move || worker(rx, hwnd, sink, worker_log))
                 .map_err(|e| dbg(&log, &format!("smtc thread spawn failed: {e}")))
                 .ok();

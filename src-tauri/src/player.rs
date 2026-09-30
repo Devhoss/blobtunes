@@ -91,7 +91,7 @@ impl Player {
         // must not touch the window; `None` simply means "no media session".
         let hwnd = main_window_hwnd(&app);
         let handle = thread::Builder::new()
-            .name("wavesurf-mpv".into())
+            .name("blobtunes-mpv".into())
             .spawn(move || run_core(app, tx2, rx, st, hwnd))
             .map_err(|e| anyhow!("spawn player thread: {e}"))?;
         Ok(Self {
@@ -275,7 +275,7 @@ fn build_mpv() -> Result<Mpv> {
         // Deep-debug: mpv's own internal log (demuxer/segment-level truth —
         // fetch failures, EOF causes, reconnect behavior) goes to a file so
         // the next live-cutoff repro captures what our event log can't see.
-        init.set_option("log-file", "E:/dev/wavesurf/mpv-debug.log")?;
+        init.set_option("log-file", "E:/dev/blobtunes/mpv-debug.log")?;
         // NOTE on module names: mpv has demux/hls/ffmpeg/stream/ao modules
         // but no `network` or `core` modules (network traffic surfaces under
         // stream/ffmpeg, core state under cplayer) — those two are covered
@@ -346,7 +346,7 @@ fn spawn_live_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
     let tx2 = tx.clone();
     let cancel = arm_resolver_cancel();
     thread::Builder::new()
-        .name("wavesurf-live-resolve".into())
+        .name("blobtunes-live-resolve".into())
         .spawn(move || {
             let cmd = match crate::ytdlp::resolve_live_hls(&url, &cancel) {
                 Ok(t) => PlayerCmd::LoadResolved(gen, t),
@@ -367,7 +367,7 @@ fn spawn_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
     let tx2 = tx.clone();
     let cancel = arm_resolver_cancel();
     thread::Builder::new()
-        .name("wavesurf-resolve".into())
+        .name("blobtunes-resolve".into())
         .spawn(move || {
             let cmd = match crate::ytdlp::resolve_stream(&url, &cancel) {
                 Ok(t) => PlayerCmd::LoadResolved(gen, t),
@@ -505,7 +505,7 @@ fn attempt_recovery(
             let _ = tx.send(cmd);
         };
         thread::Builder::new()
-            .name("wavesurf-fallback".into())
+            .name("blobtunes-fallback".into())
             .spawn(inner)
             .ok();
         return true;
@@ -562,13 +562,13 @@ fn run_core(
         match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("E:/dev/wavesurf/player-debug.log")
+            .open("E:/dev/blobtunes/player-debug.log")
         {
             Ok(f) => f,
             Err(_) => match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(std::env::temp_dir().join("wavesurf-player-debug.log"))
+                .open(std::env::temp_dir().join("blobtunes-player-debug.log"))
             {
                 Ok(f) => f,
                 Err(_) => return,

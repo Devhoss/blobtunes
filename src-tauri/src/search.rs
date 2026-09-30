@@ -466,11 +466,11 @@ mod tests {
     }
 
     /// Explicit live integration test. Run with:
-    ///   WAVESURF_YT_API_KEY=<key> cargo test live_search -- --ignored --nocapture
+    ///   BLOBTUNES_YT_API_KEY=<key> cargo test live_search -- --ignored --nocapture
     #[test]
     #[ignore]
     fn live_search() {
-        let key = std::env::var("WAVESURF_YT_API_KEY").expect("set WAVESURF_YT_API_KEY");
+        let key = std::env::var("BLOBTUNES_YT_API_KEY").expect("set BLOBTUNES_YT_API_KEY");
         let c = SearchClient::new();
         c.set_key(key);
         let items = futures_block_on(c.search("lofi hip hop radio")).expect("search failed");
