@@ -272,18 +272,24 @@ fn build_mpv() -> Result<Mpv> {
         // application-level recovery handles expired or stalled HLS URLs.
         init.set_option("demuxer-readahead-secs", "20")?;
         init.set_option("demuxer-max-bytes", "15M")?;
-        // Deep-debug: mpv's own internal log (demuxer/segment-level truth —
-        // fetch failures, EOF causes, reconnect behavior) goes to a file so
-        // the next live-cutoff repro captures what our event log can't see.
-        init.set_option("log-file", "E:/dev/blobtunes/mpv-debug.log")?;
-        // NOTE on module names: mpv has demux/hls/ffmpeg/stream/ao modules
-        // but no `network` or `core` modules (network traffic surfaces under
-        // stream/ffmpeg, core state under cplayer) — those two are covered
-        // by all=warn, not invented here.
-        init.set_option(
-            "msg-level",
-            "all=warn,demux=debug,hls=debug,ffmpeg=debug,stream=debug,ao=debug",
-        )?;
+        // Deep-debug (debug builds only): mpv's own internal log (demuxer/
+        // segment-level truth — fetch failures, EOF causes, reconnect
+        // behavior) goes to a file so the next live-cutoff repro captures
+        // what our event log can't see. Release: no file, no debug chatter —
+        // per-segment debug lines are exactly the unbounded disk growth we
+        // must not ship.
+        #[cfg(debug_assertions)]
+        {
+            init.set_option("log-file", "E:/dev/blobtunes/mpv-debug.log")?;
+            // NOTE on module names: mpv has demux/hls/ffmpeg/stream/ao modules
+            // but no `network` or `core` modules (network traffic surfaces under
+            // stream/ffmpeg, core state under cplayer) — those two are covered
+            // by all=warn, not invented here.
+            init.set_option(
+                "msg-level",
+                "all=warn,demux=debug,hls=debug,ffmpeg=debug,stream=debug,ao=debug",
+            )?;
+        }
         Ok(())
     })?;
     mpv.enable_all_events()?;
@@ -295,7 +301,36 @@ fn build_mpv() -> Result<Mpv> {
     Ok(mpv)
 }
 
-pub(crate) fn dbg(log: &std::sync::Arc<std::sync::Mutex<std::fs::File>>, msg: &str) {
+/// The player's debug event log. Debug builds: a real file (dev-machine path,
+/// temp-dir fallback). Release builds: an in-memory sink — a shipped player
+/// must not append unbounded logs to disk, and must not depend on a writable
+/// log path to play at all.
+pub(crate) type DebugLog =
+    std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>;
+
+fn open_debug_log() -> Box<dyn std::io::Write + Send> {
+    #[cfg(not(debug_assertions))]
+    {
+        Box::new(std::io::sink())
+    }
+    #[cfg(debug_assertions)]
+    {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("E:/dev/blobtunes/player-debug.log")
+            .or_else(|_| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(std::env::temp_dir().join("blobtunes-player-debug.log"))
+            })
+            .map(|f| Box::new(f) as Box<dyn std::io::Write + Send>)
+            .unwrap_or_else(|_| Box::new(std::io::sink()))
+    }
+}
+
+pub(crate) fn dbg(log: &DebugLog, msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = log.lock() {
         let _ = writeln!(f, "[{:.3}] {}", elapsed_secs(), msg);
@@ -397,7 +432,7 @@ fn reload_current(
     tx: &Sender<PlayerCmd>,
     current_url: &Option<String>,
     load_gen: &mut u64,
-    log: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+    log: &DebugLog,
 ) -> Result<()> {
     let url = current_url
         .clone()
@@ -444,7 +479,7 @@ fn attempt_recovery(
     live_retry_count: &mut u32,
     current_url: &Option<String>,
     load_gen: &mut u64,
-    log: &std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+    log: &DebugLog,
     vod_fallback_used: &mut bool,
     reason: &str,
 ) -> bool {
@@ -554,27 +589,9 @@ fn run_core(
     state: Arc<Mutex<PlayerState>>,
     hwnd: Option<u64>,
 ) {
-    // Prefer the usual dev-machine path, but never let a missing drive/dir
-    // panic this thread (that used to brick the whole player permanently
-    // with no supervision to restart it). Fall back to the OS temp dir, and
-    // to no logging at all rather than crashing if even that fails.
-    let log_file = std::sync::Arc::new(std::sync::Mutex::new(
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("E:/dev/blobtunes/player-debug.log")
-        {
-            Ok(f) => f,
-            Err(_) => match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(std::env::temp_dir().join("blobtunes-player-debug.log"))
-            {
-                Ok(f) => f,
-                Err(_) => return,
-            },
-        },
-    ));
+    // Deep-debug hooks are debug-only (see open_debug_log / build_mpv):
+    // release builds write no log files at all.
+    let log_file = std::sync::Arc::new(std::sync::Mutex::new(open_debug_log()));
     let log = log_file.clone();
     dbg(&log, "run_core start");
     let mpv = match build_mpv() {

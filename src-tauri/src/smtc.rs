@@ -115,9 +115,8 @@ pub use other::Smtc;
 #[cfg(windows)]
 mod win {
     use super::{CommandSink, MediaCommand, NowPlaying, POSITION_PUBLISH_INTERVAL};
-    use crate::player::dbg;
+    use crate::player::{dbg, DebugLog};
     use playwire::{Capabilities, Event, MediaControls, PlaybackState, PlayerConfig, Repeat, Track};
-    use std::fs::File;
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::sync::{Arc, Mutex};
     use std::thread::{self, JoinHandle};
@@ -243,14 +242,14 @@ mod win {
         /// Last snapshot the OS was told about; the throttle lives here so the
         /// player thread only ever does comparisons.
         last: Mutex<Option<Published>>,
-        log: Arc<Mutex<File>>,
+        log: DebugLog,
         handle: Mutex<Option<JoinHandle<()>>>,
     }
 
     impl Smtc {
         /// Spawn the SMTC thread. `hwnd` is the app's main window: SMTC attaches
         /// to a window, and the interop call that creates the session needs one.
-        pub fn start(hwnd: u64, sink: Arc<dyn CommandSink>, log: Arc<Mutex<File>>) -> Self {
+        pub fn start(hwnd: u64, sink: Arc<dyn CommandSink>, log: DebugLog) -> Self {
             let (tx, rx) = channel::<Request>();
             let worker_log = Arc::clone(&log);
             let handle = thread::Builder::new()
@@ -317,7 +316,7 @@ mod win {
         hwnd: u64,
         sink: Arc<dyn CommandSink>,
         position: Arc<Mutex<f64>>,
-        log: &Arc<Mutex<File>>,
+        log: &DebugLog,
     ) -> playwire::Result<MediaControls> {
         // No COM/WinRT apartment setup is needed: `playwire` activates SMTC via
         // windows-rs, whose factory path falls back to `CoIncrementMTAUsage` on
@@ -352,7 +351,7 @@ mod win {
         })
     }
 
-    fn worker(rx: Receiver<Request>, hwnd: u64, sink: Arc<dyn CommandSink>, log: Arc<Mutex<File>>) {
+    fn worker(rx: Receiver<Request>, hwnd: u64, sink: Arc<dyn CommandSink>, log: DebugLog) {
         dbg(&log, "smtc worker up");
         // Created on the first publish that has something to show, so an idle
         // Blobtunes never registers an empty media session.
@@ -512,15 +511,15 @@ mod win {
 #[cfg(not(windows))]
 mod other {
     use super::{CommandSink, NowPlaying};
-    use std::fs::File;
-    use std::sync::{Arc, Mutex};
+    use crate::player::DebugLog;
+    use std::sync::Arc;
 
     /// SMTC is a Windows feature. Elsewhere this is inert — and the player core
     /// never even starts one, because there is no window handle to attach to.
     pub struct Smtc;
 
     impl Smtc {
-        pub fn start(_hwnd: u64, _sink: Arc<dyn CommandSink>, _log: Arc<Mutex<File>>) -> Self {
+        pub fn start(_hwnd: u64, _sink: Arc<dyn CommandSink>, _log: DebugLog) -> Self {
             Self
         }
         pub fn publish(&self, _np: NowPlaying<'_>) {}
