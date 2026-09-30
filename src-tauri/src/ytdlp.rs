@@ -288,6 +288,74 @@ pub fn probe(url: &str, cancel: &AtomicBool) -> Result<TrackMeta> {
     Ok(track_meta(&d))
 }
 
+/// Cap for one playlist import: mixes (RD…) and auto-playlists can hold
+/// thousands of entries, and even paging them through would blow yt-dlp's
+/// wall-clock budget below.
+const PLAYLIST_IMPORT_CAP: u32 = 100;
+
+/// Bulk metadata fetch for a pasted playlist URL. One yt-dlp call with
+/// `--flat-playlist`: entries come straight off the playlist pages with no
+/// per-video extraction, so a full import costs one subprocess spawn.
+/// Blocking — call from a background thread.
+pub fn fetch_playlist(url: &str, cancel: &AtomicBool) -> Result<Vec<TrackMeta>> {
+    let exe = find_yt_dlp()?;
+    // run_dump's fixed `--no-playlist` is a no-op on pure /playlist URLs
+    // (it only rewrites watch?v=...&list= pages), so no flag refactor needed.
+    let cap = PLAYLIST_IMPORT_CAP.to_string();
+    let json = run_dump(&exe, &["--flat-playlist", "--playlist-end", &cap], url, cancel)?;
+    parse_flat_playlist(&json)
+}
+
+/// NDJSON from `--flat-playlist --dump-json`: one JSON object per line.
+/// Keeps video entries with well-formed 11-char ids; skips container
+/// records (playlist-level dumps carry `entries` and long PL… ids).
+fn parse_flat_playlist(out: &str) -> Result<Vec<TrackMeta>> {
+    let mut tracks: Vec<TrackMeta> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in out.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("entries").is_some() {
+            continue;
+        }
+        let Some(id) = v.get("id").and_then(|i| i.as_str()) else {
+            continue;
+        };
+        if id.len() != 11 || !seen.insert(id.to_string()) {
+            continue;
+        }
+        let id = id.to_string();
+        let text = |keys: &[&str]| -> Option<String> {
+            keys.iter()
+                .find_map(|k| v.get(*k).and_then(|t| t.as_str()))
+                .map(str::to_owned)
+        };
+        tracks.push(TrackMeta {
+            title: text(&["title"]).unwrap_or_else(|| format!("Video {id}")),
+            channel: text(&["channel", "uploader", "artist", "uploader_id"])
+                .unwrap_or_default(),
+            duration: v.get("duration").and_then(|d| d.as_f64()),
+            is_live: v
+                .get("is_live")
+                .and_then(|l| l.as_bool())
+                .unwrap_or(false),
+            thumbnail: text(&["thumbnail"]),
+            id,
+        });
+    }
+    if tracks.is_empty() {
+        return Err(anyhow!(
+            "no entries found — private, empty, or region-locked playlist?"
+        ));
+    }
+    Ok(tracks)
+}
+
 fn bitrate(f: &DlpFormat) -> f64 {
     f.abr.or(f.tbr).unwrap_or(0.0)
 }
@@ -598,6 +666,41 @@ mod tests {
         assert!(serde_json::from_str::<DlpDump>("nope").is_err());
     }
 
+    #[test]
+    fn flat_playlist_ndjson_parses() {
+        // Realistic dump shape: container record first (skipped by both the
+        // `entries` guard and the 11-char id filter), full entry, entry with
+        // only `uploader`, entry missing title/duration, duplicate id.
+        let out = r#"
+{"id":"PLGwRdxNW4CGoR0FtOEQGGmo5N71WpKT3R","title":"My List","type":"playlist","entries":[{"id":"dQw4w9WgXcQ"}]}
+{"id":"dQw4w9WgXcQ","title":"Never Gonna Give You Up","channel":"Rick Astley","duration":212.0,"thumbnail":"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg","url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","ie_key":"Youtube"}
+{"id":"JX4oZsnQhIA","title":"Ünïcødé ✓ track","uploader":"Chœur","duration":null}
+{"id":"cYw-QfEYbaA","uploader":"NoTitleChan"}
+{"id":"dQw4w9WgXcQ","title":"dupe of first"}
+"#;
+        let tracks = parse_flat_playlist(out).unwrap();
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[0].id, "dQw4w9WgXcQ");
+        assert_eq!(tracks[0].channel, "Rick Astley");
+        assert_eq!(tracks[0].duration, Some(212.0));
+        assert_eq!(tracks[1].title, "Ünïcødé ✓ track");
+        assert_eq!(tracks[1].channel, "Chœur");
+        assert_eq!(tracks[1].duration, None);
+        assert_eq!(tracks[2].title, "Video cYw-QfEYbaA");
+        assert!(tracks.iter().all(|t| !t.is_live));
+    }
+
+    #[test]
+    fn flat_playlist_garbage_is_error() {
+        assert!(parse_flat_playlist("").is_err());
+        assert!(parse_flat_playlist("not json at all").is_err());
+        // Container record only -> no playable entries.
+        assert!(parse_flat_playlist(
+            r#"{"id":"PLGwRdxNW4CGoR0FtOEQGGmo5N71WpKT3R","entries":[],"type":"playlist"}"#
+        )
+        .is_err());
+    }
+
     /// wait_cancel must kill a hung child as soon as the flag trips — this
     /// is what reaps superseded resolves instead of letting them pile up.
     /// Uses localhost ping as the dummy long process (Windows-only).
@@ -695,6 +798,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(m.id, "dQw4w9WgXcQ");
+    }
+
+    #[test]
+    #[ignore] // needs network + yt-dlp — run explicitly
+    fn fetch_playlist_real() {
+        let t = fetch_playlist(
+            "https://www.youtube.com/playlist?list=PLGwRdxNW4CGoR0FtOEQGGmo5N71WpKT3R",
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(!t.is_empty());
+        assert!(t.iter().all(|m| m.id.len() == 11));
+        println!("playlist entries: {}", t.len());
     }
 
     #[test]

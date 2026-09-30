@@ -1,8 +1,24 @@
 const ID_RE = /^[a-zA-Z0-9_-]{11}$/;
+const LIST_ID_RE = /^[a-zA-Z0-9_-]{13,}$/;
 const HOST_RE = /^(?:[a-z0-9-]+\.)*youtube\.com$/i;
 
 export function isYouTubeUrl(raw: string): boolean {
-  return extractVideoId(raw) !== null;
+  return extractVideoId(raw) !== null || extractPlaylistId(raw) !== null;
+}
+
+export function extractPlaylistId(raw: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(raw.trim());
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  if (u.hostname === "youtu.be") return null;
+  if (!HOST_RE.test(u.hostname)) return null;
+  if (u.pathname !== "/playlist") return null;
+  const list = u.searchParams.get("list");
+  return list && LIST_ID_RE.test(list) ? list : null;
 }
 
 export function extractVideoId(raw: string): string | null {

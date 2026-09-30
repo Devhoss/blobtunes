@@ -15,6 +15,7 @@ export interface QueueState {
 
 export type QueueAction =
   | { type: "enqueue"; track: Track }
+  | { type: "enqueue_all"; tracks: Track[] } // bulk add (playlist import): order-preserving, dedup by id
   | { type: "play"; track: Track } // enqueue-if-new + select: ▶ means "hear this now"
   | { type: "remove"; index: number }
   | { type: "select"; index: number }
@@ -32,6 +33,20 @@ export function queueReducer(s: QueueState, a: QueueAction): QueueState {
         items: [...s.items, a.track],
         currentIndex: s.currentIndex === -1 ? 0 : s.currentIndex,
       };
+    case "enqueue_all": {
+      const seen = new Set(s.items.map((t) => t.id));
+      const fresh: Track[] = [];
+      for (const t of a.tracks) {
+        if (seen.has(t.id)) continue;
+        seen.add(t.id);
+        fresh.push(t);
+      }
+      if (fresh.length === 0) return s;
+      return {
+        items: [...s.items, ...fresh],
+        currentIndex: s.currentIndex === -1 ? 0 : s.currentIndex,
+      };
+    }
     case "play": {
       const exists = s.items.findIndex((t) => t.id === a.track.id);
       const items = exists >= 0 ? s.items : [...s.items, a.track];

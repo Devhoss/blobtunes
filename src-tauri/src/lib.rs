@@ -84,6 +84,18 @@ async fn probe_url(url: String) -> Result<ytdlp::TrackMeta, String> {
     .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn fetch_playlist(url: String) -> Result<Vec<ytdlp::TrackMeta>, String> {
+    // One flat yt-dlp pass (no per-video extraction); same off-thread and
+    // never-cancel rationale as probe_url — user-initiated, back button works.
+    tokio::task::spawn_blocking(move || {
+        ytdlp::fetch_playlist(&url, &std::sync::atomic::AtomicBool::new(false))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // MUST run before the Tauri builder creates any webview (see module docs):
@@ -128,6 +140,7 @@ pub fn run() {
             set_api_key,
             has_api_key,
             probe_url,
+            fetch_playlist,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blobtunes");

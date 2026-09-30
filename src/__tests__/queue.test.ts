@@ -42,6 +42,33 @@ describe("enqueue", () => {
   });
 });
 
+describe("enqueue_all", () => {
+  it("appends in order and selects the first when queue was empty", () => {
+    const s = queueReducer(initialState, {
+      type: "enqueue_all",
+      tracks: [vod("a"), vod("b"), vod("c")],
+    });
+    expect(s.items.map((t) => t.id)).toEqual(["a", "b", "c"]);
+    expect(s.currentIndex).toBe(0);
+  });
+  it("keeps the current selection when appending to a non-empty queue", () => {
+    let s = queueReducer(initialState, { type: "enqueue", track: vod("a") });
+    s = queueReducer(s, { type: "play", track: vod("b") });
+    s = queueReducer(s, { type: "enqueue_all", tracks: [vod("c"), vod("d")] });
+    expect(s.items.map((t) => t.id)).toEqual(["a", "b", "c", "d"]);
+    expect(s.currentIndex).toBe(1);
+  });
+  it("dedupes against the queue and within the batch", () => {
+    let s = queueReducer(initialState, { type: "enqueue", track: vod("b") });
+    s = queueReducer(s, { type: "enqueue_all", tracks: [vod("a"), vod("b"), vod("a")] });
+    expect(s.items.map((t) => t.id)).toEqual(["b", "a"]);
+  });
+  it("is a no-op when everything already exists", () => {
+    const s = queueReducer(initialState, { type: "enqueue", track: vod("a") });
+    expect(queueReducer(s, { type: "enqueue_all", tracks: [vod("a")] })).toBe(s);
+  });
+});
+
 describe("play", () => {
   it("plays a new track immediately while another is playing", () => {
     let s = queueReducer(initialState, { type: "enqueue", track: vod("a") });

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
-import { isYouTubeUrl } from "./lib/youtube";
+import { extractPlaylistId, isYouTubeUrl, watchUrl } from "./lib/youtube";
 import { initialState, queueReducer, type Track } from "./lib/queue";
 import { toTrack, type SearchItem } from "./lib/search";
 import { rowPrimaryAction, restoreVolume } from "./lib/nowPlaying";
@@ -381,6 +381,11 @@ export default function App() {
     [],
   );
 
+  const enqueueAll = useCallback(
+    (ts: Track[]) => dispatch({ type: "enqueue_all", tracks: ts }),
+    [],
+  );
+
   // Emptying the queue has to stop the sound too: a track the user removed must
   // not keep playing from a queue that no longer holds it.
   function clearQueue() {
@@ -450,6 +455,41 @@ export default function App() {
 
   async function addLink() {
     const raw = trimmed;
+    if (extractPlaylistId(raw)) {
+      setSearchErr("");
+      setMsg("unrolling the playlist…");
+      try {
+        const metas = await invoke<{
+          id: string;
+          title: string;
+          channel: string;
+          duration: number | null;
+          is_live: boolean;
+          thumbnail: string | null;
+        }[]>("fetch_playlist", { url: raw });
+        enqueueAll(
+          metas.map((m) => ({
+            id: m.id,
+            // Per-video watch URLs: playback resolves each entry on its own,
+            // and the queue stays correct if the playlist later changes.
+            sourceUrl: watchUrl(m.id),
+            title: m.title,
+            channel: m.channel,
+            duration: m.is_live ? null : m.duration,
+            isLive: m.is_live,
+            thumbnailUrl: m.thumbnail ?? undefined,
+          })),
+        );
+        setQuery("");
+        setResultsQuery("");
+        setMsg(`added ${metas.length} to the drawer`);
+        setView("queue");
+      } catch (e) {
+        setSearchErr(String(e).slice(0, 180));
+        setMsg("nothing local · paste a link");
+      }
+      return;
+    }
     if (!isYouTubeUrl(raw)) {
       setSearchErr("Not a valid public YouTube URL.");
       return;
