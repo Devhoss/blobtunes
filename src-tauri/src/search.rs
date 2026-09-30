@@ -229,23 +229,50 @@ pub fn merge_durations(mut items: Vec<SearchItem>, videos_json: &str) -> Result<
 }
 
 // ---- API key persistence (outside repo, in the OS config dir) ----
+// The file was named wavesurf.json before the Blobtunes rename; load runs a
+// one-time migration, same spirit as webview_profile::prepare().
 pub fn key_file(app: &tauri::AppHandle) -> Result<PathBuf> {
     use tauri::Manager;
     let dir = app.path().app_config_dir().context("no config dir")?;
-    Ok(dir.join("wavesurf.json"))
+    Ok(dir.join("blobtunes.json"))
+}
+
+#[derive(Deserialize)]
+struct Cfg {
+    youtube_api_key: Option<String>,
+}
+
+fn read_key_at(p: &std::path::Path) -> Result<Option<String>> {
+    let cfg: Cfg = serde_json::from_str(&std::fs::read_to_string(p)?)?;
+    Ok(cfg.youtube_api_key.filter(|k| !k.trim().is_empty()))
+}
+
+/// One-time rename migration: read the legacy file, write under the new name,
+/// and only then remove the old one — any failure keeps the key under the
+/// legacy path instead of losing it. Returns None (touching nothing) when the
+/// new file already exists or there is no legacy file.
+fn migrate_legacy_key(
+    new_p: &std::path::Path,
+    old_p: &std::path::Path,
+) -> Option<String> {
+    if new_p.exists() || !old_p.exists() {
+        return None;
+    }
+    let key = read_key_at(old_p).ok().flatten()?;
+    let json = serde_json::json!({ "youtube_api_key": key });
+    std::fs::write(new_p, serde_json::to_string_pretty(&json).ok()?).ok()?;
+    let _ = std::fs::remove_file(old_p);
+    Some(key)
 }
 
 pub fn load_api_key(app: &tauri::AppHandle) -> Result<Option<String>> {
+    use tauri::Manager;
     let p = key_file(app)?;
-    if !p.exists() {
-        return Ok(None);
+    if p.exists() {
+        return read_key_at(&p);
     }
-    #[derive(Deserialize)]
-    struct Cfg {
-        youtube_api_key: Option<String>,
-    }
-    let cfg: Cfg = serde_json::from_str(&std::fs::read_to_string(p)?)?;
-    Ok(cfg.youtube_api_key.filter(|k| !k.trim().is_empty()))
+    let dir = app.path().app_config_dir().context("no config dir")?;
+    Ok(migrate_legacy_key(&p, &dir.join("wavesurf.json")))
 }
 
 pub fn save_api_key(app: &tauri::AppHandle, key: &str) -> Result<()> {
@@ -451,6 +478,58 @@ mod tests {
         for i in items.iter().take(3) {
             println!("{} | live={} | dur={:?}", i.title, i.is_live, i.duration);
         }
+    }
+
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "blobtunes-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn api_key_migration_renames_once() {
+        let dir = unique_tmp_dir("keytest");
+        let old = dir.join("wavesurf.json");
+        let new = dir.join("blobtunes.json");
+
+        std::fs::write(&old, r#"{"youtube_api_key":"AIza-TEST"}"#).unwrap();
+        assert_eq!(
+            migrate_legacy_key(&new, &old).as_deref(),
+            Some("AIza-TEST")
+        );
+        assert!(!old.exists(), "legacy file must be gone after migration");
+        assert_eq!(read_key_at(&new).unwrap().as_deref(), Some("AIza-TEST"));
+
+        // Idempotent: new name exists, so a reappearing legacy file is left
+        // alone and never clobbers the live one.
+        std::fs::write(&old, r#"{"youtube_api_key":"AIza-STALE"}"#).unwrap();
+        assert_eq!(migrate_legacy_key(&new, &old), None);
+        assert_eq!(read_key_at(&new).unwrap().as_deref(), Some("AIza-TEST"));
+        assert!(old.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn api_key_migration_noop_without_legacy() {
+        let dir = unique_tmp_dir("keytest-none");
+        let old = dir.join("wavesurf.json");
+        let new = dir.join("blobtunes.json");
+        assert_eq!(migrate_legacy_key(&new, &old), None);
+        assert!(!new.exists());
+        // Empty-key legacy file: nothing to migrate, old file untouched.
+        std::fs::write(&old, r#"{"youtube_api_key":""}"#).unwrap();
+        assert_eq!(migrate_legacy_key(&new, &old), None);
+        assert!(old.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn futures_block_on<F: std::future::Future>(f: F) -> F::Output {
