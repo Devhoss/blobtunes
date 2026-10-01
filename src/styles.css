@@ -53,16 +53,15 @@ h1{font:700 17px/1.2 var(--disp);letter-spacing:-.01em;display:-webkit-box;-webk
 .times{display:flex;justify-content:space-between;font:500 11px var(--mono);color:var(--mute)}
 .live{color:#ff8b8b;font-weight:700;letter-spacing:1px;font-size:10px}
 .live .dot{animation:blink 1.6s infinite}
-/* The repeat coin rides IN the row beside Next, as in the design. Centring
-   four buttons as-is puts the play pill 27px off the centre line — the app's
-   very first bug report — so the row is centred as trio+phantom: padding-left
-   of coin+gap (54px) balances the coin on the right and lands the pill on the
-   card's centre line. The children never shrink: letting flexbox shave the
-   coin breaks the phantom's arithmetic, and min-width:0 keeps the padding
-   out of the grid column's min-content floor (which shoved every centred row
-   sideways in narrow windows). Below the 340px minimum the row overflows
-   symmetrically, so the pill is still the centre of the card. */
-.ctl{grid-area:ctl;display:flex;align-items:center;justify-content:center;gap:14px;width:100%;min-width:0;margin-top:4px;padding-left:54px}
+/* The design's row is prev/play/next, centred. Two coins balance it for
+   real now — shuffle on the left, repeat on the right — replacing the old
+   phantom padding (coin+gap of 54px) that faked the balance when only the
+   repeat coin existed. The children never shrink: letting flexbox shave a
+   coin breaks the symmetry, and min-width:0 keeps padding out of the grid
+   column's min-content floor (which shoved every centred row sideways in
+   narrow windows). Below the 340px minimum the row overflows symmetrically,
+   so the pill is still the centre of the card. */
+.ctl{grid-area:ctl;display:flex;align-items:center;justify-content:center;gap:14px;width:100%;min-width:0;margin-top:4px}
 .ctl > *{flex-shrink:0}
 .transport{display:flex;align-items:center;gap:14px}
 .b{width:46px;height:46px;border:1px solid var(--line);border-radius:50%;background:#ffffff0f;color:var(--ink);cursor:pointer;display:grid;place-items:center;position:relative;transition:transform .15s cubic-bezier(.3,1.6,.5,1),background .15s}
@@ -73,8 +72,9 @@ h1{font:700 17px/1.2 var(--disp);letter-spacing:-.01em;display:-webkit-box;-webk
 .b.go svg{width:22px;height:22px}
 .b.go:hover{transform:translateY(-3px) scale(1.06) rotate(0)}
 .b.go:active{transform:scale(.88,.94)}
-.b.repeat{width:40px;height:40px}
-.b.repeat.on{color:var(--a);border-color:var(--a);background:hsl(var(--h) 60% 50% / .18)}
+.b.repeat,.b.shuffle{width:40px;height:40px}
+.b.repeat.on,.b.shuffle.on{color:var(--a);border-color:var(--a);background:hsl(var(--h) 60% 50% / .18)}
+.b.shuffle svg{width:17px;height:17px}
 /* The "1" inherits the accent like the design's; no red pill. */
 .b.repeat .one{position:absolute;right:5px;bottom:3px;font:500 9px var(--mono);font-style:normal;line-height:1;color:inherit}
 .vol{grid-area:vol;display:flex;align-items:center;gap:10px;width:70%;font:500 10px var(--mono);letter-spacing:.14em;color:var(--mute);margin-top:4px}
@@ -100,7 +100,7 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;bac
 .dense .b{width:34px;height:34px}
 .dense .b.go{width:52px;height:38px;border-radius:19px}
 .dense .b.go svg{width:16px;height:16px}
-.dense .b.repeat{width:34px;height:34px}
+.dense .b.repeat,.dense .b.shuffle{width:34px;height:34px}
 .dense .b.repeat .one{font-size:8px}
 .dense .ctl{justify-content:flex-start;gap:8px;margin:0;width:auto;padding-left:0}
 .dense .transport{gap:8px}
@@ -127,6 +127,9 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;bac
 .lv{color:#ff6b7d}
 .row.cur{background:hsl(var(--h) 60% 50% / .2)}
 .row.cur .n{color:var(--a)}
+/* Dimmed only while shuffle is ON: rows the current pass already consumed. */
+.row.played{opacity:.5}
+.row.played:hover{opacity:.75}
 .act{display:flex;gap:8px;align-items:center}
 .ic{width:28px;height:28px;border-radius:50%;border:1px solid var(--line);background:#ffffff0d;color:var(--mute);display:grid;place-items:center;font:700 14px var(--mono);cursor:pointer;transition:.15s;font-style:normal}
 .row:hover .ic,.ic:focus-visible{background:var(--a);color:var(--dark);border-color:transparent}
@@ -155,7 +158,7 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;bac
 .mini .info{text-align:left}
 .mini h1{font-size:12px;-webkit-line-clamp:1}
 .mini .b{width:34px;height:34px}
-.mini .b.repeat{width:34px;height:34px}
+.mini .b.repeat,.mini .b.shuffle{width:34px;height:34px}
 .mini .b.go{width:52px;height:38px;border-radius:19px}
 .mini .b.go svg{width:16px;height:16px}
 .mini .b.repeat .one{font-size:8px}

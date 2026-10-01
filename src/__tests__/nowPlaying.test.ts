@@ -71,4 +71,15 @@ describe("repeat policy", () => {
       resolveEndedAction({ mode: "all", currentIndex: 2, length: 3, isLive: true }),
     ).toBe("next");
   });
+  it("shuffle mode never wraps — the pass logic owns exhaustion", () => {
+    expect(
+      resolveEndedAction({
+        mode: "all",
+        currentIndex: 2,
+        length: 3,
+        isLive: false,
+        shuffle: true,
+      }),
+    ).toBe("next");
+  });
 });

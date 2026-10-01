@@ -4,7 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { PhysicalSize } from "@tauri-apps/api/dpi";
 import { extractPlaylistId, isYouTubeUrl, watchUrl } from "./lib/youtube";
-import { initialState, queueReducer, type Track } from "./lib/queue";
+import {
+  initialState,
+  queueReducer,
+  loadQueue,
+  serializeQueue,
+  QUEUE_KEY,
+  type Track,
+} from "./lib/queue";
 import { toTrack, type SearchItem } from "./lib/search";
 import { rowPrimaryAction, restoreVolume } from "./lib/nowPlaying";
 import {
@@ -85,7 +92,18 @@ function tile(id: string, thumb?: string): React.CSSProperties {
 }
 
 export default function App() {
-  const [queue, dispatch] = useReducer(queueReducer, initialState);
+  // List-only resume: the saved queue comes back as a LIST — selection never
+  // returns, so the app cannot startle you with sound on launch.
+  const [queue, dispatch] = useReducer(queueReducer, initialState, () =>
+    loadQueue(localStorage.getItem(QUEUE_KEY)),
+  );
+  useEffect(() => {
+    try {
+      localStorage.setItem(QUEUE_KEY, serializeQueue(queue));
+    } catch {
+      // private mode / quota: persistence is best-effort, never load-bearing
+    }
+  }, [queue]);
   const [ps, setPs] = useState<PlayerState>(EMPTY_STATE);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchItem[] | null>(null);
@@ -301,6 +319,7 @@ export default function App() {
       currentIndex: queue.currentIndex,
       length: queue.items.length,
       isLive: current.isLive === true,
+      shuffle: queue.shuffle === true,
     });
     if (act === "reload") {
       invoke("player_load", { url: current.sourceUrl }).catch((e) =>
@@ -309,9 +328,13 @@ export default function App() {
       return;
     }
     if (queue.items.length > 0)
-      dispatch(act === "wrap" ? { type: "select", index: 0 } : { type: "next" });
+      dispatch(
+        act === "wrap"
+          ? { type: "wrap" }
+          : { type: "next", freshPass: repeatMode === "all", roll: Math.random() },
+      );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ps.ended, current?.id, queue.items.length, queue.currentIndex, repeatMode]);
+  }, [ps.ended, current?.id, queue.items.length, queue.currentIndex, queue.shuffle, repeatMode]);
 
   // selected track changed -> load it
   useEffect(() => {
@@ -430,6 +453,7 @@ export default function App() {
   const vol = (v: number) => {
     volumeDrag.current = v;
     setPs((s) => ({ ...s, volume: v }));
+    localStorage.setItem("blobtunes:volume", String(v));
     invoke("player_set_volume", { volume: v }).catch((e) =>
       setPs((s) => ({ ...s, error: String(e) })),
     );
@@ -441,6 +465,16 @@ export default function App() {
   useEffect(() => {
     if (ps.volume > 0) lastVol.current = ps.volume;
   }, [ps.volume]);
+  // Volume survives restarts: the remembered value is pushed to mpv once on
+  // mount (the player thread queues commands received during init, so the
+  // ordering is safe).
+  useEffect(() => {
+    const raw = localStorage.getItem("blobtunes:volume");
+    if (raw === null) return;
+    const v = Math.round(Number(raw));
+    if (Number.isFinite(v) && v >= 0 && v <= 100)
+      invoke("player_set_volume", { volume: v }).catch(() => {});
+  }, []);
   // Mute toggle: fire-and-forget, NO optimistic update. The owner loop
   // pushes state on change within a tick, and position ticks emit pushes
   // carrying the pre-command volume in between — an optimistic volume
@@ -448,6 +482,7 @@ export default function App() {
   // use the volumeDrag guard instead of optimistic updates).
   const toggleMute = () => {
     const v = ps.volume === 0 ? restoreVolume(lastVol.current) : 0;
+    localStorage.setItem("blobtunes:volume", String(v));
     invoke("player_set_volume", { volume: v }).catch((e) =>
       setPs((s) => ({ ...s, error: String(e) })),
     );
@@ -776,6 +811,35 @@ export default function App() {
             is ours, so it rides absolutely at the right edge instead of
             pushing the play pill off the card's centre line. */}
         <div className="ctl">
+          {/* The shuffle coin rides at the LEFT edge, mirroring the repeat
+              coin on the right: two real 40px coins + gaps replace the old
+              phantom padding and keep the play pill on the centre line. */}
+          <button
+            className={`b shuffle${queue.shuffle === true ? " on" : ""}`}
+            title={queue.shuffle === true ? "Shuffle: on" : "Shuffle: off"}
+            aria-label={queue.shuffle === true ? "Shuffle: on" : "Shuffle: off"}
+            aria-pressed={queue.shuffle === true}
+            onClick={() => {
+              const next = queue.shuffle !== true;
+              dispatch({ type: "toggle_shuffle" });
+              setMsg(next ? "shuffling the rest" : "back in order");
+            }}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M3 6h5l9 12h3.5" />
+              <path d="M3 18h5l9-12h3.5" />
+              <path d="M17.5 3.5 21 6l-3.5 2.5" />
+              <path d="M17.5 15.5 21 18l-3.5 2.5" />
+            </svg>
+          </button>
           <span className="transport">
           <button
             className="b"
@@ -984,7 +1048,9 @@ export default function App() {
           {view === "queue" &&
             queue.items.map((t, k) => (
               <div
-                className={`row${k === queue.currentIndex ? " cur" : ""}`}
+                className={`row${k === queue.currentIndex ? " cur" : ""}${
+                  queue.shuffle === true && queue.played?.includes(t.id) ? " played" : ""
+                }`}
                 key={t.id}
                 role="button"
                 tabIndex={k === 0 ? 0 : -1}

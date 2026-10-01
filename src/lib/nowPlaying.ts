@@ -27,7 +27,9 @@ export function restoreVolume(lastNonZero: number): number {
 
 /** Repeat policy for natural track end. Cycles off -> all -> one -> off.
  * Live tracks are always excluded (plain next): looping a dying HLS feed
- * helps nobody. Pure — tested in nowPlaying.test.ts. */
+ * helps nobody. Under hidden-pass shuffle the "last index" has no meaning
+ * (the pass logic in the queue reducer owns exhaustion), so shuffle mode
+ * never takes the wrap branch. Pure — tested in nowPlaying.test.ts. */
 export type RepeatMode = "off" | "all" | "one";
 export type EndedAction = "next" | "wrap" | "reload";
 
@@ -40,11 +42,13 @@ export function resolveEndedAction(opts: {
   currentIndex: number;
   length: number;
   isLive: boolean;
+  shuffle?: boolean;
 }): EndedAction {
   if (opts.isLive) return "next";
   if (opts.mode === "one") return "reload";
   if (
     opts.mode === "all" &&
+    !opts.shuffle &&
     opts.length > 0 &&
     opts.currentIndex >= opts.length - 1
   )

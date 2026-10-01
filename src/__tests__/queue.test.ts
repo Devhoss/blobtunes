@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { initialState, queueReducer, type Track } from "../lib/queue";
+import {
+  initialState,
+  queueReducer,
+  pickNextIndex,
+  serializeQueue,
+  loadQueue,
+  QUEUE_CAP,
+  type QueueState,
+  type Track,
+} from "../lib/queue";
 
 const vod = (id: string): Track => ({
   id,
@@ -135,5 +144,150 @@ describe("clear", () => {
     expect(queueReducer({ items: [live("x")], currentIndex: 0 }, { type: "clear" })).toEqual(
       initialState,
     );
+  });
+});
+
+describe("pickNextIndex", () => {
+  const items = [vod("a"), vod("b"), vod("c"), vod("d")];
+  it("excludes the current track and every played id", () => {
+    expect(pickNextIndex(items, ["b"], 0, 0)).toBe(2); // pool = [c, d]
+    expect(pickNextIndex(items, ["b"], 0, 0.999)).toBe(3);
+  });
+  it("clamps out-of-range rolls into the pool", () => {
+    expect(pickNextIndex(items, [], 0, 1.5)).toBe(3);
+    expect(pickNextIndex(items, [], 0, -1)).toBe(1);
+  });
+  it("returns -1 when the pool is exhausted", () => {
+    expect(pickNextIndex(items, ["b", "c", "d"], 0, 0.5)).toBe(-1);
+  });
+});
+
+describe("shuffle (hidden pass)", () => {
+  const base = (() => {
+    let s = queueReducer(initialState, {
+      type: "enqueue_all",
+      tracks: [vod("a"), vod("b"), vod("c"), vod("d")],
+    });
+    return { ...s, shuffle: true };
+  })();
+
+  it("toggle flips without reordering items", () => {
+    const s = queueReducer(base, { type: "toggle_shuffle" });
+    expect(s.shuffle).toBeUndefined();
+    expect(s.items).toEqual(base.items);
+    expect(queueReducer(s, { type: "toggle_shuffle" }).shuffle).toBe(true);
+  });
+  it("advance picks from the unplayed pool and records the departed track", () => {
+    const s = queueReducer(base, { type: "next", roll: 0.999 });
+    expect(s.items[s.currentIndex].id).toBe("d");
+    expect(s.played).toEqual(["a"]);
+  });
+  it("every track plays once per pass; an exhausted pool holds when repeat is off", () => {
+    let s = queueReducer(base, { type: "next", roll: 0 }); // -> b, played [a]
+    s = queueReducer(s, { type: "next", roll: 0 }); // -> c, played [a,b]
+    expect(s.items.map((t) => t.id)[s.currentIndex]).toBe("c");
+    const held = queueReducer(s, { type: "next", roll: 0 }); // pool = [d] still
+    expect(held.items[held.currentIndex].id).toBe("d");
+    const exhausted = queueReducer(held, { type: "next", roll: 0 });
+    expect(exhausted).toBe(held); // same object: no silent restart
+  });
+  it("repeat-all (freshPass) starts a new pass with only the departed track marked", () => {
+    const allPlayed = { ...base, currentIndex: 3, played: ["a", "b", "c"] };
+    const s = queueReducer(allPlayed, { type: "next", freshPass: true, roll: 0 });
+    expect(s.items[s.currentIndex].id).toBe("a"); // pool reset, d excluded (departed)
+    expect(s.played).toEqual(["d"]);
+  });
+  it("prev walks the played timeline backwards", () => {
+    let s: QueueState = { items: [vod("a"), vod("b"), vod("c")], currentIndex: 2, shuffle: true, played: ["a", "b"] };
+    s = queueReducer(s, { type: "prev" });
+    expect(s.items[s.currentIndex].id).toBe("b"); // last played, un-marked
+    expect(s.played).toEqual(["a"]); // c stays out: stepping back is not a listen
+    s = queueReducer(s, { type: "prev" });
+    expect(s.items[s.currentIndex].id).toBe("a");
+    expect(s.played).toEqual([]);
+  });
+  it("manual select makes a played track hearable again", () => {
+    let s: QueueState = { ...base, played: ["a", "b"], currentIndex: 2 };
+    s = queueReducer(s, { type: "select", index: 0 });
+    expect(s.currentIndex).toBe(0);
+    expect(s.played).toEqual(["b", "c"]); // arrived a un-marked, departed c recorded
+  });
+  it("linear mode keeps exact prev/next semantics while still recording", () => {
+    let s: QueueState = { items: [vod("a"), vod("b"), vod("c")], currentIndex: 0 };
+    s = queueReducer(s, { type: "next" });
+    expect(s.currentIndex).toBe(1);
+    expect(s.played).toEqual(["a"]);
+    s = queueReducer(s, { type: "wrap" });
+    expect(s.currentIndex).toBe(0);
+  });
+  it("remove reconciles the played ledger", () => {
+    let s: QueueState = { items: [vod("a"), vod("b")], currentIndex: 1, played: ["a"], shuffle: true };
+    s = queueReducer(s, { type: "remove", index: 0 });
+    expect(s.currentIndex).toBe(0);
+    expect(s.played).toEqual([]);
+  });
+  it("a restored list (currentIndex -1) never auto-selects on enqueue", () => {
+    const s = queueReducer({ items: [vod("a")], currentIndex: -1 }, { type: "enqueue", track: vod("b") });
+    expect(s.currentIndex).toBe(-1);
+    const s2 = queueReducer({ items: [vod("a")], currentIndex: -1 }, {
+      type: "enqueue_all",
+      tracks: [vod("b")],
+    });
+    expect(s2.currentIndex).toBe(-1);
+  });
+  it("clear keeps the shuffle intent but drops the ledger", () => {
+    const s = queueReducer(
+      { items: [vod("a")], currentIndex: 0, shuffle: true, played: ["a"] },
+      { type: "clear" },
+    );
+    expect(s).toEqual({ items: [], currentIndex: -1, shuffle: true });
+  });
+});
+
+describe("queue persistence", () => {
+  it("round-trips items, shuffle and the played ledger", () => {
+    let s = queueReducer(initialState, {
+      type: "enqueue_all",
+      tracks: [vod("a"), vod("b")],
+    });
+    s = queueReducer(s, { type: "toggle_shuffle" });
+    s = queueReducer(s, { type: "next", roll: 0.5 });
+    const back = loadQueue(serializeQueue(s));
+    expect(back.items.map((t) => t.id)).toEqual(s.items.map((t) => t.id));
+    expect(back.shuffle).toBe(true);
+    expect(back.played).toEqual(s.played);
+    expect(back.currentIndex).toBe(-1); // list-only resume, always
+  });
+  it("garbage never throws and always yields a clean empty queue", () => {
+    expect(loadQueue(null)).toEqual(initialState);
+    expect(loadQueue("not json")).toEqual(initialState);
+    expect(loadQueue('{"v":2,"items":[]}')).toEqual(initialState);
+    expect(loadQueue('{"v":1,"items":[{"id":"a"}]}')).toEqual(initialState);
+    expect(loadQueue('{"v":1}')).toEqual(initialState);
+  });
+  it("keeps valid rows, drops malformed and duplicate ones", () => {
+    const raw = JSON.stringify({
+      v: 1,
+      items: [
+        { id: "a", sourceUrl: "u", title: "t", channel: "c", duration: null, isLive: true },
+        { id: "a", sourceUrl: "u", title: "dup", channel: "c", duration: 1, isLive: false },
+        { id: "b", sourceUrl: "u", title: "t", channel: "c", duration: 5, isLive: false },
+        "junk",
+        null,
+        42,
+      ],
+    });
+    expect(loadQueue(raw).items.map((t) => t.id)).toEqual(["a", "b"]);
+  });
+  it("caps a poisoned queue size", () => {
+    const items = Array.from({ length: QUEUE_CAP + 100 }, (_, i) => ({
+      id: `id${i}`,
+      sourceUrl: "u",
+      title: "t",
+      channel: "c",
+      duration: 1,
+      isLive: false,
+    }));
+    expect(loadQueue(JSON.stringify({ v: 1, items })).items).toHaveLength(QUEUE_CAP);
   });
 });
