@@ -355,7 +355,7 @@ pub(crate) fn set_child_below_normal(child: &std::process::Child) {
     }
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 pub(crate) fn child_priority_class(pid: u32) -> Option<u32> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
