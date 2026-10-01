@@ -1134,7 +1134,17 @@ export default function App() {
         </div>
       )}
 
-      <div className="tabs" role="group" aria-label="View">
+      <div
+        className="tabs"
+        role="group"
+        aria-label="View"
+        style={
+          {
+            "--ti": view === "now" ? 0 : view === "results" ? 1 : 2,
+          } as React.CSSProperties
+        }
+      >
+        <span className="pill" aria-hidden="true" />
         <button aria-pressed={view === "now"} onClick={() => setView("now")}>
           NOW
         </button>

@@ -143,10 +143,14 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;border-radius:50%;bac
 .sr b{height:10px;width:80%}
 .sr b+b{width:45%}
 .dim,.pulse{animation:dim .8s ease-in-out infinite alternate}
-.tabs{display:flex;gap:4px;padding:6px 10px;border-top:1px solid var(--line);flex-shrink:0}
-.tabs button{flex:1;border:0;border-radius:99px;padding:7px 0;background:none;color:var(--mute);font:500 10px var(--mono);letter-spacing:.12em;cursor:pointer;transition:.15s}
+.tabs{position:relative;display:flex;gap:4px;padding:6px 10px;border-top:1px solid var(--line);flex-shrink:0}
+/* One sliding pill, not three background crossfades: rapid tab switches used to
+   leave two buttons half-tinted at once, which read as the pill "jumping".
+   --ti is the selected index; translateX % is relative to the pill's own width. */
+.tabs .pill{position:absolute;left:10px;top:6px;bottom:6px;width:calc((100% - 28px)/3);border-radius:99px;background:var(--a);transform:translateX(calc(var(--ti,0) * (100% + 4px)));transition:transform .15s}
+.tabs button{position:relative;flex:1;border:0;border-radius:99px;padding:7px 0;background:none;color:var(--mute);font:500 10px var(--mono);letter-spacing:.12em;cursor:pointer;transition:.15s}
 .tabs button:hover{color:var(--ink)}
-.tabs button[aria-pressed=true]{background:var(--a);color:var(--dark)}
+.tabs button[aria-pressed=true]{color:var(--dark)}
 .tabs b{font-weight:500;opacity:.7;margin-left:5px}
 .sb{padding:9px 16px;border-top:1px solid var(--line);font:500 10px var(--mono);color:var(--mute);display:flex;justify-content:space-between;gap:10px;background:#0000003a;flex-shrink:0}
 .sb .m{color:var(--a);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
