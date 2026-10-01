@@ -16,6 +16,7 @@ import { toTrack, type SearchItem } from "./lib/search";
 import { rowPrimaryAction, restoreVolume } from "./lib/nowPlaying";
 import {
   nextRepeatMode,
+  prefetchTarget,
   resolveEndedAction,
   type RepeatMode,
 } from "./lib/nowPlaying";
@@ -154,6 +155,11 @@ export default function App() {
   const volumeDrag = useRef<number | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const lastVol = useRef(80); // last non-zero volume, for unmute restore
+  // Prefetch bookkeeping: the id fired for the background resolve (one
+  // fire per target — position pushes are continuous) and the committed
+  // pick the next shuffle advance consumes so the resolve is never wasted.
+  const prefetchedId = useRef<string | null>(null);
+  const committedNext = useRef<string | null>(null);
 
   const current =
     queue.currentIndex >= 0 ? queue.items[queue.currentIndex] : undefined;
@@ -331,10 +337,44 @@ export default function App() {
       dispatch(
         act === "wrap"
           ? { type: "wrap" }
-          : { type: "next", freshPass: repeatMode === "all", roll: Math.random() },
+          : {
+              type: "next",
+              freshPass: repeatMode === "all",
+              roll: Math.random(),
+              // The prefetched track wins the pick when still legal, so the
+              // background resolve lands on the player instead of the dice
+              // picking someone else and paying a fresh inline dump.
+              commitId: committedNext.current ?? undefined,
+            },
       );
+    committedNext.current = null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ps.ended, current?.id, queue.items.length, queue.currentIndex, queue.shuffle, repeatMode]);
+
+  // Background prefetch of the next target. Fires in the last 45 seconds
+  // of the current track (or right away for shorter ones) — the 60-min
+  // resolve TTL plus single-flight in the backend mean one cheap dump buys
+  // an instant advance, and a play racing the prefetch just joins it.
+  // Live tracks never trigger this: their pushes carry duration=null.
+  // prefetchedId is the fire-once guard; the guard self-clears when the
+  // computed target changes (queue edits, shuffle toggles, skips), which
+  // is exactly the invalidation the commit needs — and the reducer re-
+  // validates the commit before honoring it.
+  useEffect(() => {
+    if (!ps.playing || ps.duration == null || ps.duration <= 0) return;
+    const pos = ps.position ?? 0;
+    if (ps.duration > 45 && ps.duration - pos > 45) return;
+    const idx = prefetchTarget(queue, repeatMode);
+    if (idx === null) return;
+    const target = queue.items[idx];
+    if (!target || target.id === current?.id) return;
+    if (prefetchedId.current === target.id) return;
+    prefetchedId.current = target.id;
+    committedNext.current = target.id;
+    invoke("prefetch_url", { url: target.sourceUrl }).catch(() => {
+      // Silent: a failed prefetch just means a normal inline resolve later.
+    });
+  }, [ps.playing, ps.position, ps.duration, queue, repeatMode, current?.id]);
 
   // selected track changed -> load it
   useEffect(() => {

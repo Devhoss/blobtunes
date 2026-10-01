@@ -2,8 +2,13 @@ use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use wait_timeout::ChildExt;
+
+/// Error message that marks a resolve as superseded (its child was already
+/// killed by wait_cancel). single_flight keys on this exact string to
+/// decide Gone vs Done — keep both sides using the constant.
+pub(crate) const SUPERSEDED_MSG: &str = "superseded by newer load";
 
 /// Spawn children without a console window. The release binary is a windowed
 /// (no-console) app, so every console-subsystem child — yt-dlp.exe, `where` —
@@ -136,10 +141,13 @@ pub fn find_yt_dlp() -> Result<String> {
 /// Short-TTL VOD resolve cache: video URL -> resolved track. Repeats and
 /// back-navigation within the window skip the ~5s unpack plus the full
 /// network extraction (measured: same video re-resolved 30s apart at full
-/// cost). googlevideo URLs live hours; 20min TTL is conservative.
+/// cost). googlevideo URLs live hours; 60min TTL is still ~6x conservative
+/// and outlives the longest normal song, so a prefetch fired ~45s before
+/// track end is a hit when the next load resolves. A rare expired URL is
+/// covered by the reactive re-resolve in player.rs.
 /// Live HLS is NEVER cached: playlists go stale fast and reconnects want
 /// fresh URLs. Entries are ~1KB; the map is pruned on every store.
-const CACHE_TTL_SECS: u64 = 20 * 60;
+const CACHE_TTL_SECS: u64 = 60 * 60;
 
 static RESOLVE_CACHE: OnceLock<Mutex<HashMap<String, (std::time::Instant, ResolvedTrack)>>> =
     OnceLock::new();
@@ -172,6 +180,200 @@ fn cache_store(url: &str, track: &ResolvedTrack) {
     slot.insert(url.to_string(), (std::time::Instant::now(), track.clone()));
 }
 
+// ---------------------------------------------------------------------------
+// Single-flight resolves, keyed by URL.
+//
+// A prefetch and a play for the SAME video must not run two 7-10s yt-dlp
+// dumps: the first caller (leader) runs the op, later callers (joiners)
+// block on its result. A cancelled joiner never touches the leader — the
+// user skipping away must not throw away a resolve that will still land in
+// the cache. A leader that gets superseded (its own cancel tripped) stores
+// Gone so a waiting joiner re-leads with its own fresh cancel instead of
+// dying on a bumped prefetch.
+// ---------------------------------------------------------------------------
+
+enum FlightState {
+    Running,
+    Done,
+    Gone,
+}
+
+pub(crate) struct Flight<T> {
+    /// (state, result) — result is published once, cloned to every joiner.
+    state: Mutex<(FlightState, Option<Result<T, String>>)>,
+    cv: std::sync::Condvar,
+}
+
+impl<T> Flight<T> {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new((FlightState::Running, None)),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+}
+
+type Flights<T> = Mutex<HashMap<String, Arc<Flight<T>>>>;
+
+/// Joiners poll in 250ms slices (cancel checks) with a generous overall
+/// budget: the leader's own dumps are bounded, so this only trips if the
+/// leader's thread itself wedges.
+const JOINER_BUDGET_SECS: u64 = 240;
+
+pub(crate) fn single_flight<T, F>(
+    flights: &Flights<T>,
+    key: &str,
+    cancel: &AtomicBool,
+    op: F,
+) -> Result<T>
+where
+    T: Clone + Send,
+    F: FnOnce(&AtomicBool) -> Result<T>,
+{
+    loop {
+        let (flight, leader) = {
+            let mut map = flights.lock().unwrap_or_else(|e| e.into_inner());
+            match map.get(key) {
+                Some(f) => (f.clone(), false),
+                None => {
+                    let f = Arc::new(Flight::new());
+                    map.insert(key.to_string(), f.clone());
+                    (f, true)
+                }
+            }
+        };
+        if leader {
+            let out = op(cancel);
+            let superseded = out
+                .as_ref()
+                .err()
+                .is_some_and(|e| e.to_string() == SUPERSEDED_MSG);
+            {
+                let mut st = flight.state.lock().unwrap_or_else(|e| e.into_inner());
+                st.1 = Some(match &out {
+                    Ok(v) => Ok(v.clone()),
+                    Err(e) => Err(e.to_string()),
+                });
+                st.0 = if superseded {
+                    FlightState::Gone
+                } else {
+                    FlightState::Done
+                };
+            }
+            flight.cv.notify_all();
+            let mut map = flights.lock().unwrap_or_else(|e| e.into_inner());
+            if map.get(key).is_some_and(|f| Arc::ptr_eq(f, &flight)) {
+                map.remove(key);
+            }
+            return out;
+        }
+
+        // Joiner: wait on the leader in cancel-checkable slices.
+        let start = std::time::Instant::now();
+        loop {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(anyhow!(SUPERSEDED_MSG));
+            }
+            if start.elapsed().as_secs() > JOINER_BUDGET_SECS {
+                return Err(anyhow!("joiner wait budget exceeded"));
+            }
+            let mut st = flight.state.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(st.0, FlightState::Running) {
+                let wait = flight
+                    .cv
+                    .wait_timeout_while(st, std::time::Duration::from_millis(250), |s| {
+                        matches!(s.0, FlightState::Running)
+                    })
+                    .unwrap_or_else(|e| e.into_inner());
+                st = wait.0;
+            }
+            match &st.0 {
+                FlightState::Running => continue,
+                FlightState::Done => {
+                    return match st.1.as_ref() {
+                        Some(Ok(v)) => Ok(v.clone()),
+                        Some(Err(e)) => Err(anyhow!("{e}")),
+                        None => Err(anyhow!("flight done without result")),
+                    };
+                }
+                FlightState::Gone => {
+                    // Drop the dead flight if nobody replaced it, then
+                    // re-loop and try to lead ourselves.
+                    drop(st);
+                    let mut map = flights.lock().unwrap_or_else(|e| e.into_inner());
+                    if map.get(key).is_some_and(|f| Arc::ptr_eq(f, &flight)) {
+                        map.remove(key);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+}
+
+static RESOLVE_FLIGHTS: OnceLock<Flights<ResolvedTrack>> = OnceLock::new();
+
+fn resolve_flights() -> &'static Flights<ResolvedTrack> {
+    RESOLVE_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Dedicated cancel slot for background prefetches. Kept SEPARATE from
+/// player.rs's load resolver slot: starting or rebumping a prefetch must
+/// never cancel the resolve for the track the user actually loaded.
+static PREFETCH_CANCEL: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+
+/// Arm a fresh prefetch cancel flag, superseding any in-flight prefetch.
+pub fn arm_prefetch_cancel() -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    if let Some(slot) = PREFETCH_CANCEL.get_or_init(|| Mutex::new(None)).lock().ok() {
+        let mut guard = slot;
+        if let Some(old) = guard.replace(flag.clone()) {
+            old.store(true, Ordering::SeqCst);
+        }
+    }
+    flag
+}
+
+#[cfg(windows)]
+/// Run a child at BELOW_NORMAL priority so a mid-song prefetch's PyInstaller
+/// unpack + extractor scan doesn't fight mpv's audio decode for CPU.
+pub(crate) fn set_child_below_normal(child: &std::process::Child) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION,
+    };
+    unsafe {
+        if let Ok(handle) = OpenProcess(
+            PROCESS_SET_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            child.id(),
+        ) {
+            let _ = SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS);
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn child_priority_class(pid: u32) -> Option<u32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetPriorityClass, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        // GetPriorityClass returns 0 on failure in the windows-0.62 bindings.
+        let class = GetPriorityClass(handle);
+        let _ = CloseHandle(handle);
+        if class == 0 {
+            None
+        } else {
+            Some(class)
+        }
+    }
+}
+
 /// Wait on a spawned yt-dlp child in short slices so a superseded resolve
 /// can be killed instead of burning unpack+scan+network (~30s here) to a
 /// completion nobody will read.
@@ -189,7 +391,7 @@ fn wait_cancel(
         if cancel.load(Ordering::SeqCst) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(anyhow!("superseded by newer load"));
+            return Err(anyhow!(SUPERSEDED_MSG));
         }
         match child
             .wait_timeout(std::time::Duration::from_millis(250))
@@ -202,7 +404,13 @@ fn wait_cancel(
     }
 }
 
-fn run_dump(exe: &str, extra: &[&str], url: &str, cancel: &AtomicBool) -> Result<String> {
+fn run_dump(
+    exe: &str,
+    extra: &[&str],
+    url: &str,
+    cancel: &AtomicBool,
+    bg: bool,
+) -> Result<String> {
     use std::process::Stdio;
     use std::time::Duration;
     let mut cmd = std::process::Command::new(exe);
@@ -222,6 +430,14 @@ fn run_dump(exe: &str, extra: &[&str], url: &str, cancel: &AtomicBool) -> Result
     let mut child = cmd
         .spawn()
         .map_err(|e| anyhow!("failed to run yt-dlp ({e})"))?;
+    // Prefetch children run below normal so they never steal CPU from the
+    // track actually playing (Windows-only knob; other platforms are fine).
+    #[cfg(windows)]
+    if bg {
+        set_child_below_normal(&child);
+    }
+    #[cfg(not(windows))]
+    let _ = bg;
     // Drain both pipes concurrently: waiting before reading can deadlock when
     // yt-dlp fills stderr/stdout while the parent is blocked in wait.
     let stdout = child.stdout.take().expect("piped stdout");
@@ -280,12 +496,13 @@ fn run_dump(exe: &str, extra: &[&str], url: &str, cancel: &AtomicBool) -> Result
 }
 
 /// Metadata-only probe for pasted URLs (fills the queue before playback).
+/// Routes through the full resolve so ONE android dump serves both the
+/// paste-time metadata and the play-time URL: VOD results land in the
+/// resolve cache and the later load is a hit. Live metadata comes back the
+/// same way; its URL is deliberately never cached.
 /// Blocking — call from a background thread.
 pub fn probe(url: &str, cancel: &AtomicBool) -> Result<TrackMeta> {
-    let exe = find_yt_dlp()?;
-    let json = run_dump(&exe, &["-f", "bestaudio/best"], url, cancel)?;
-    let d: DlpDump = serde_json::from_str(json.trim())?;
-    Ok(track_meta(&d))
+    resolve_stream(url, cancel).map(|t| t.meta)
 }
 
 /// Cap for one playlist import: mixes (RD…) and auto-playlists can hold
@@ -302,7 +519,7 @@ pub fn fetch_playlist(url: &str, cancel: &AtomicBool) -> Result<Vec<TrackMeta>> 
     // run_dump's fixed `--no-playlist` is a no-op on pure /playlist URLs
     // (it only rewrites watch?v=...&list= pages), so no flag refactor needed.
     let cap = PLAYLIST_IMPORT_CAP.to_string();
-    let json = run_dump(&exe, &["--flat-playlist", "--playlist-end", &cap], url, cancel)?;
+    let json = run_dump(&exe, &["--flat-playlist", "--playlist-end", &cap], url, cancel, false)?;
     parse_flat_playlist(&json)
 }
 
@@ -400,28 +617,54 @@ fn pick_progressive(formats: &[DlpFormat]) -> Option<String> {
         .map(|(_, u)| u.to_string())
 }
 
-/// Full resolve for playback: metadata + primary stream URL.
-/// VOD costs ONE android-client dump (~6-10s) and yields the progressive
-/// (muxed MP4, itag-18 class) URL as PRIMARY. Measured 2026-09-11 on the
-/// dev machine's network: default-client (ANDROID_VR) googlevideo edges
-/// reject open-ended Range requests (plain GET and `bytes=0-` → 403; a
-/// closed `bytes=0-65535` → 206) and lavf/ffmpeg only ever issues
-/// open-ended ranges — so default-client DASH audio can never open in mpv
-/// there, while android progressive URLs redirect to edges that accept
-/// them. The default-client dump is now only the LAST resort for videos
-/// with no progressive format at all (then the DASH URL is primary and the
-/// android URL is resolved reactively by the player on first failure).
-/// Live: the android playlist is the ad-free HLS; one extraction serves
-/// both cases. Blocking — NEVER call on the mpv owner thread.
+/// Full resolve for playback: metadata + primary stream URL, protected by
+/// the per-URL single-flight so a play arriving mid-prefetch joins the
+/// in-flight dump instead of starting a competing one. Cache hits skip
+/// everything. Blocking — NEVER call on the mpv owner thread.
 pub fn resolve_stream(url: &str, cancel: &AtomicBool) -> Result<ResolvedTrack> {
+    resolve_via(url, cancel, false)
+}
+
+/// Prefetch entry point: same flight/cache machinery, but the yt-dlp child
+/// runs at below-normal priority (see run_dump). Blocking — call from a
+/// background thread only.
+pub fn resolve_prefetch(url: &str, cancel: &AtomicBool) -> Result<ResolvedTrack> {
+    resolve_via(url, cancel, true)
+}
+
+fn resolve_via(url: &str, cancel: &AtomicBool, bg: bool) -> Result<ResolvedTrack> {
     // Repeats and back-navigation within TTL skip yt-dlp entirely.
     if let Some(hit) = cache_lookup(url) {
         return Ok(hit);
     }
+    single_flight(resolve_flights(), url, cancel, |c| {
+        // Re-check inside the flight: a previous flight may have stored
+        // while we were queued behind it.
+        if let Some(hit) = cache_lookup(url) {
+            return Ok(hit);
+        }
+        do_resolve(url, c, bg)
+    })
+}
+
+/// The actual extraction work (no cache, no flight — resolve_via wraps it).
+/// VOD costs ONE android-client dump (~6-10s, mostly yt-dlp process startup)
+/// and yields the progressive (muxed MP4, itag-18 class) URL as PRIMARY.
+/// Measured 2026-09-11 on the dev machine's network: default-client
+/// (ANDROID_VR) googlevideo edges reject open-ended Range requests (plain
+/// GET and `bytes=0-` → 403; a closed `bytes=0-65535` → 206) and lavf/ffmpeg
+/// only ever issues open-ended ranges — so default-client DASH audio can
+/// never open in mpv there, while android progressive URLs redirect to
+/// edges that accept them. The default-client dump is now only the LAST
+/// resort for videos with no progressive format at all (then the DASH URL
+/// is primary and the android URL is resolved reactively by the player on
+/// first failure). Live: the android playlist is the ad-free HLS; one
+/// extraction serves both cases.
+fn do_resolve(url: &str, cancel: &AtomicBool, bg: bool) -> Result<ResolvedTrack> {
     let exe = find_yt_dlp()?;
 
     // Android client first: VOD progressive primary, live ad-free HLS.
-    if let Ok(d) = android_dump(&exe, url, cancel) {
+    if let Ok(d) = android_dump(&exe, url, cancel, bg) {
         if d.is_live.unwrap_or(false) {
             if let Some(u) = pick_hls_url(&d.formats) {
                 return Ok(ResolvedTrack {
@@ -447,7 +690,7 @@ pub fn resolve_stream(url: &str, cancel: &AtomicBool) -> Result<ResolvedTrack> {
         // No progressive https format → fall through to the default dump.
     }
 
-    let json = run_dump(&exe, &["-f", "bestaudio/best"], url, cancel)?;
+    let json = run_dump(&exe, &["-f", "bestaudio/best"], url, cancel, bg)?;
     let d: DlpDump = serde_json::from_str(json.trim()).context("default dump not valid JSON")?;
     let meta = track_meta(&d);
 
@@ -490,7 +733,12 @@ pub fn resolve_stream(url: &str, cancel: &AtomicBool) -> Result<ResolvedTrack> {
 /// Android-client dump, parsed. Used for live HLS (ad-free playlists) and
 /// the VOD tier-2 fallback — one shared code path so each call site pays
 /// for the slower android extraction only when it needs it.
-fn android_dump(exe: &str, url: &str, cancel: &AtomicBool) -> Result<DlpDump> {
+fn android_dump(
+    exe: &str,
+    url: &str,
+    cancel: &AtomicBool,
+    bg: bool,
+) -> Result<DlpDump> {
     let json = run_dump(
         exe,
         &[
@@ -501,6 +749,7 @@ fn android_dump(exe: &str, url: &str, cancel: &AtomicBool) -> Result<DlpDump> {
         ],
         url,
         cancel,
+        bg,
     )?;
     serde_json::from_str(json.trim()).context("android dump not valid JSON")
 }
@@ -510,7 +759,7 @@ fn android_dump(exe: &str, url: &str, cancel: &AtomicBool) -> Result<DlpDump> {
 /// (DASH primary) fails its first open — not on every load.
 pub fn resolve_fallback_url(url: &str, cancel: &AtomicBool) -> Result<Option<String>> {
     let exe = find_yt_dlp()?;
-    let d = android_dump(&exe, url, cancel)?;
+    let d = android_dump(&exe, url, cancel, false)?;
     Ok(pick_progressive(&d.formats))
 }
 
@@ -522,7 +771,7 @@ pub fn resolve_fallback_url(url: &str, cancel: &AtomicBool) -> Result<Option<Str
 /// Blocking — NEVER call on the mpv owner thread.
 pub fn resolve_live_hls(url: &str, cancel: &AtomicBool) -> Result<ResolvedTrack> {
     let exe = find_yt_dlp()?;
-    let d = android_dump(&exe, url, cancel)?;
+    let d = android_dump(&exe, url, cancel, false)?;
     let primary =
         pick_hls_url(&d.formats).ok_or_else(|| anyhow!("android dump has no HLS format"))?;
     Ok(ResolvedTrack {
@@ -557,7 +806,8 @@ fn pick_hls_url(formats: &[DlpFormat]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::thread;
 
     const VOD_DUMP: &str = r#"{"id":"dQw4w9WgXcQ","title":"Never Gonna Give You Up","channel":"Rick Astley","duration":212.0,"thumbnail":"https://i.ytimg.com/vi/x/maxresdefault.jpg","formats":[
       {"format_id":"251","url":"https://rr5.googlevideo.com/v?dash-opus","protocol":"https","vcodec":"none","acodec":"opus","abr":128.0},
@@ -752,6 +1002,180 @@ mod tests {
         assert!(!cache_fresh(
             std::time::Instant::now() - std::time::Duration::from_secs(CACHE_TTL_SECS + 1)
         ));
+    }
+
+    /// TTL must outlive the longest normal song so a prefetch fired ~45s
+    /// before track end is still a hit when the next load resolves.
+    /// 60min leaves room for a 40min+ mix while the reactive re-resolve in
+    /// player.rs covers the rare expired URL.
+    #[test]
+    fn ttl_covers_long_tracks() {
+        assert!(cache_fresh(
+            std::time::Instant::now() - std::time::Duration::from_secs(30 * 60)
+        ));
+        assert!(CACHE_TTL_SECS >= 45 * 60);
+    }
+
+    fn test_cancel() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    /// Two callers on the same key share ONE run of the underlying op:
+    /// a play that arrives while a prefetch is mid-resolve joins it
+    /// instead of spawning a second 7-10s yt-dlp dump.
+    #[test]
+    fn single_flight_shares_one_run() {
+        let flights = Arc::new(Mutex::new(HashMap::<String, Arc<Flight<u32>>>::new()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let f = flights.clone();
+            let r = runs.clone();
+            let c = test_cancel();
+            handles.push(
+                thread::Builder::new()
+                    .spawn(move || {
+                        single_flight(&f, "single-flight-share", &c, |_| {
+                            r.fetch_add(1, Ordering::SeqCst);
+                            thread::sleep(std::time::Duration::from_millis(250));
+                            Ok(42u32)
+                        })
+                    })
+                    .unwrap(),
+            );
+        }
+        for h in handles {
+            assert_eq!(h.join().unwrap().unwrap(), 42);
+        }
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "op must run exactly once");
+        assert!(
+            flights.lock().unwrap().is_empty(),
+            "flight entry must be removed when done"
+        );
+    }
+
+    /// A cancelled JOINER (user skipped to another track mid-wait) returns
+    /// superseded WITHOUT touching the leader — the leader still finishes
+    /// and fills the cache for later.
+    #[test]
+    fn joiner_cancel_leaves_leader_running() {
+        let flights = Arc::new(Mutex::new(HashMap::<String, Arc<Flight<u32>>>::new()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let leader_flights = flights.clone();
+        let leader_runs = runs.clone();
+        let leader_cancel = test_cancel();
+        let leader = thread::spawn(move || {
+            single_flight(&leader_flights, "single-flight-joiner-cancel", &leader_cancel, |_| {
+                runs_clone_inc(&leader_runs);
+                thread::sleep(std::time::Duration::from_millis(400));
+                Ok(7u32)
+            })
+        });
+        thread::sleep(std::time::Duration::from_millis(60)); // leader registers first
+        let joiner_cancel = test_cancel();
+        let jf = flights.clone();
+        let jc = joiner_cancel.clone();
+        let joiner = thread::spawn(move || {
+            single_flight(&jf, "single-flight-joiner-cancel", &jc, |_| Ok(0u32))
+        });
+        thread::sleep(std::time::Duration::from_millis(80));
+        joiner_cancel.store(true, Ordering::SeqCst);
+        let jr = joiner.join().unwrap();
+        assert!(jr.is_err(), "cancelled joiner must not return a result");
+        assert_eq!(leader.join().unwrap().unwrap(), 7, "leader must complete");
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "cancel must not kill the leader");
+    }
+
+    fn runs_clone_inc(r: &Arc<AtomicUsize>) {
+        r.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// When the LEADER is superseded (its prefetch got bumped by a newer
+    /// target), it stores Gone and the joiner takes over as a fresh leader
+    /// with its own cancel flag — the load never dies on a bumped prefetch.
+    #[test]
+    fn leader_superseded_lets_joiner_take_over() {
+        let flights = Arc::new(Mutex::new(HashMap::<String, Arc<Flight<u32>>>::new()));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let leader_flights = flights.clone();
+        let leader_runs = runs.clone();
+        let leader_cancel = test_cancel();
+        let leader_trip = leader_cancel.clone();
+        let leader = thread::spawn(move || {
+            single_flight(&leader_flights, "single-flight-gone", &leader_trip, |c| {
+                runs_clone_inc(&leader_runs);
+                while !c.load(Ordering::SeqCst) {
+                    thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(anyhow!(crate::ytdlp::SUPERSEDED_MSG))
+            })
+        });
+        thread::sleep(std::time::Duration::from_millis(60));
+        let joiner_cancel = test_cancel();
+        let jf = flights.clone();
+        let jr_runs = runs.clone();
+        let joiner = thread::spawn(move || {
+            single_flight(&jf, "single-flight-gone", &joiner_cancel, move |_| {
+                runs_clone_inc(&jr_runs);
+                Ok(9u32)
+            })
+        });
+        thread::sleep(std::time::Duration::from_millis(80));
+        leader_cancel.store(true, Ordering::SeqCst);
+        assert_eq!(
+            joiner.join().unwrap().unwrap(),
+            9,
+            "joiner must re-lead and get its own op's result"
+        );
+        let _ = leader.join();
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "second op must run after Gone");
+    }
+
+    /// The prefetch slot trips only the previous prefetch — it never
+    /// touches the load-path resolver generations (they keep their own
+    /// slot), so starting a prefetch cannot bump a playing track's load.
+    #[test]
+    fn prefetch_slot_trips_previous_only() {
+        let a = arm_prefetch_cancel();
+        let b = arm_prefetch_cancel();
+        assert!(a.load(Ordering::SeqCst), "previous prefetch must be superseded");
+        assert!(!b.load(Ordering::SeqCst), "fresh prefetch flag must be armed open");
+    }
+
+    /// A child demoted via set_child_below_normal really carries
+    /// BELOW_NORMAL afterwards — and a control child left alone must NOT,
+    /// so this test cannot pass vacuously.
+    #[cfg(windows)]
+    #[test]
+    fn low_priority_child_is_below_normal() {
+        use windows::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS;
+        let spawn_ping = || {
+            std::process::Command::new("cmd")
+                .args(["/C", "ping -n 8 127.0.0.1 >NUL"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn cmd")
+        };
+        let mut control = spawn_ping();
+        let mut demoted = spawn_ping();
+        set_child_below_normal(&demoted);
+        let control_class = child_priority_class(control.id());
+        let demoted_class = child_priority_class(demoted.id());
+        let _ = control.kill();
+        let _ = control.wait();
+        let _ = demoted.kill();
+        let _ = demoted.wait();
+        assert_eq!(
+            demoted_class,
+            Some(BELOW_NORMAL_PRIORITY_CLASS.0),
+            "demoted child must be BELOW_NORMAL"
+        );
+        assert_ne!(
+            control_class,
+            Some(BELOW_NORMAL_PRIORITY_CLASS.0),
+            "control child must not be BELOW_NORMAL"
+        );
     }
 
     /// Store + hit roundtrip (unique keys: the cache is a shared global).

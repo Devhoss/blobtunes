@@ -277,6 +277,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "wait-timeout",
+ "windows 0.62.2",
 ]
 
 [[package]]

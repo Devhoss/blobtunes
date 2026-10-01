@@ -76,12 +76,27 @@ fn has_api_key(app: tauri::AppHandle) -> bool {
 async fn probe_url(url: String) -> Result<ytdlp::TrackMeta, String> {
     // spawn_blocking: yt-dlp takes seconds and must not stall the async runtime
     // Paste probes are user-initiated and rare: never-cancelled flag.
+    // probe() routes through the full resolve, so a VOD paste also fills the
+    // resolve cache — playing that link later is a hit, not a second dump.
     tokio::task::spawn_blocking(move || {
         ytdlp::probe(&url, &std::sync::atomic::AtomicBool::new(false))
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())
+}
+
+/// Fire-and-forget background resolve of the track the queue is about to
+/// reach. Shares the per-URL flight with play-time resolves (a play
+/// arriving mid-prefetch JOINS it), supersedes only the previous prefetch,
+/// and swallows errors — a failed prefetch just means a normal inline
+/// resolve at play time.
+#[tauri::command]
+async fn prefetch_url(url: String) {
+    tokio::task::spawn_blocking(move || {
+        let cancel = ytdlp::arm_prefetch_cancel();
+        let _ = ytdlp::resolve_prefetch(&url, &cancel);
+    });
 }
 
 #[tauri::command]
@@ -140,6 +155,7 @@ pub fn run() {
             set_api_key,
             has_api_key,
             probe_url,
+            prefetch_url,
             fetch_playlist,
         ])
         .run(tauri::generate_context!())

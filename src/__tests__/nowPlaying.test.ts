@@ -2,8 +2,27 @@ import { describe, it, expect } from "vitest";
 import { rowPrimaryAction, restoreVolume } from "../lib/nowPlaying";
 import {
   nextRepeatMode,
+  prefetchTarget,
   resolveEndedAction,
 } from "../lib/nowPlaying";
+import { type QueueState, type Track } from "../lib/queue";
+
+const vod = (id: string): Track => ({
+  id,
+  sourceUrl: `https://www.youtube.com/watch?v=${id}`,
+  title: id,
+  channel: "Chan",
+  duration: 100,
+  isLive: false,
+});
+const live = (id: string): Track => ({
+  id,
+  sourceUrl: `https://www.youtube.com/watch?v=${id}`,
+  title: id,
+  channel: "Chan",
+  duration: null,
+  isLive: true,
+});
 
 describe("rowPrimaryAction", () => {
   it("non-current row offers Play", () => {
@@ -81,5 +100,59 @@ describe("repeat policy", () => {
         shuffle: true,
       }),
     ).toBe("next");
+  });
+});
+
+describe("prefetchTarget", () => {
+  it("linear mode targets the row after the current one", () => {
+    const q: QueueState = { items: [vod("a"), vod("b"), vod("c")], currentIndex: 1 };
+    expect(prefetchTarget(q, "off")).toBe(2);
+  });
+  it("linear end: repeat-off has no target, repeat-all wraps to 0", () => {
+    const q: QueueState = { items: [vod("a"), vod("b")], currentIndex: 1 };
+    expect(prefetchTarget(q, "off")).toBeNull();
+    expect(prefetchTarget(q, "all")).toBe(0);
+  });
+  it("repeat-one has no target — the reload is the current (cached) track", () => {
+    const q: QueueState = { items: [vod("a"), vod("b")], currentIndex: 0 };
+    expect(prefetchTarget(q, "one")).toBeNull();
+  });
+  it("live targets are never prefetched (URLs too short-lived to cache)", () => {
+    const q: QueueState = { items: [vod("a"), live("L")], currentIndex: 0 };
+    expect(prefetchTarget(q, "off")).toBeNull();
+  });
+  it("shuffle mode targets an unplayed, non-current track", () => {
+    const q: QueueState = {
+      items: [vod("a"), vod("b"), vod("c"), vod("d")],
+      currentIndex: 0,
+      shuffle: true,
+      played: ["a", "c"],
+    };
+    expect(prefetchTarget(q, "off")).toBe(1); // pool [b,d], deterministic roll
+  });
+  it("shuffle mode is side-effect free: no pool consumption, no mutation", () => {
+    const q: QueueState = {
+      items: [vod("a"), vod("b"), vod("c")],
+      currentIndex: 0,
+      shuffle: true,
+      played: ["a"],
+    };
+    const snapshot = JSON.parse(JSON.stringify(q));
+    prefetchTarget(q, "off");
+    prefetchTarget(q, "off");
+    expect(q).toEqual(snapshot);
+  });
+  it("exhausted shuffle pool only leaves the current track: no target", () => {
+    const q: QueueState = {
+      items: [vod("a"), vod("b")],
+      currentIndex: 0,
+      shuffle: true,
+      played: ["b"],
+    };
+    expect(prefetchTarget(q, "all")).toBeNull();
+  });
+  it("no selection (restored list) has no target", () => {
+    const q: QueueState = { items: [vod("a"), vod("b")], currentIndex: -1 };
+    expect(prefetchTarget(q, "off")).toBeNull();
   });
 });

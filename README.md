@@ -126,9 +126,15 @@ WebView2 host.
 ## Known limits
 
 - No private / age-gated / region-blocked videos anonymously (clear error, no crash).
-- First play resolves in ~6–8s for VOD (one yt-dlp dump; the progressive
-  fallback resolves only if the primary URL fails) and ~15–20s for live
-  (default + android dumps — see below).
+- First play of a never-seen link resolves in ~7–10s for VOD and ~10–15s for
+  live. Most of that is yt-dlp's own process startup (~7s per spawn on
+  Windows measured 2026-10), not the network — the app is doing one
+  android-client dump per resolve. Everything after that is fast: Blobtunes
+  prefetches the next queue track in the background during the last 45
+  seconds of whatever is playing (at below-normal CPU priority), so queue
+  advances start nearly instantly, and repeats/back-navigation hit a 60-min
+  resolve cache. Live tracks are excluded from prefetch (their stream URLs
+  expire too fast to be worth caching).
 - **Live streams with server-side ad inserts stutter.** Some YouTube live
   broadcasts (notably 24/7 music streams) splice ad segments into the HLS
   timeline without discontinuity markers. ffmpeg's demuxer cannot step past

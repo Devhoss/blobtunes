@@ -31,7 +31,7 @@ export type QueueAction =
   | { type: "play"; track: Track } // enqueue-if-new + select: ▶ means "hear this now"
   | { type: "remove"; index: number }
   | { type: "select"; index: number }
-  | { type: "next"; freshPass?: boolean; roll?: number }
+  | { type: "next"; freshPass?: boolean; roll?: number; commitId?: string }
   | { type: "wrap"; roll?: number }
   | { type: "prev" }
   | { type: "toggle_shuffle" }
@@ -79,10 +79,23 @@ function move(s: QueueState, toIndex: number, record = true): QueueState {
   };
 }
 
-/** Shuffle-mode advance. Pool exhausted: with `freshPass` (repeat-all) the
- *  timeline resets and a new pass begins; otherwise stay put — the same
- *  "queue ran out" silence as linear mode. */
-function shuffleAdvance(s: QueueState, freshPass: boolean, roll: number): QueueState {
+/** Shuffle-mode advance. `commitId` is the track a prefetch already
+ *  resolved: if it is still a legal pick (in the queue, unplayed, not the
+ *  current track) it wins outright, so the resolve is never wasted by the
+ *  dice landing elsewhere. Pool exhausted: with `freshPass` (repeat-all)
+ *  the timeline resets and a new pass begins; otherwise stay put — the
+ *  same "queue ran out" silence as linear mode. */
+function shuffleAdvance(
+  s: QueueState,
+  freshPass: boolean,
+  roll: number,
+  commitId?: string,
+): QueueState {
+  if (commitId) {
+    const idx = s.items.findIndex((t) => t.id === commitId);
+    if (idx >= 0 && idx !== s.currentIndex && !(s.played ?? []).includes(commitId))
+      return move(s, idx);
+  }
   const idx = pickNextIndex(s.items, s.played ?? [], s.currentIndex, roll);
   if (idx >= 0) return move(s, idx);
   if (!freshPass) return s;
@@ -142,7 +155,8 @@ export function queueReducer(s: QueueState, a: QueueAction): QueueState {
       return move(s, a.index);
     case "next": {
       if (s.items.length === 0) return s;
-      if (s.shuffle) return shuffleAdvance(s, a.freshPass === true, a.roll ?? Math.random());
+      if (s.shuffle)
+        return shuffleAdvance(s, a.freshPass === true, a.roll ?? Math.random(), a.commitId);
       return move(s, Math.min(s.currentIndex + 1, s.items.length - 1));
     }
     case "wrap":

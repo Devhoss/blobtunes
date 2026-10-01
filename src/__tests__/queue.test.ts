@@ -291,3 +291,53 @@ describe("queue persistence", () => {
     expect(loadQueue(JSON.stringify({ v: 1, items })).items).toHaveLength(QUEUE_CAP);
   });
 });
+
+describe("committed shuffle pick (prefetch)", () => {
+  const four = (): QueueState => ({
+    items: [vod("a"), vod("b"), vod("c"), vod("d")],
+    currentIndex: 0,
+    shuffle: true,
+    played: ["a"],
+  });
+
+  it("next consumes the committed id even when roll points elsewhere", () => {
+    // Pool is [b, c, d]; roll 0 would pick b — the commit must win.
+    const s = queueReducer(four(), { type: "next", roll: 0, commitId: "d" });
+    expect(s.currentIndex).toBe(3);
+    expect(s.played).toEqual(["a"]);
+  });
+  it("falls back to the pool when the committed track is already played", () => {
+    const sq: QueueState = {
+      items: [vod("a"), vod("b"), vod("c"), vod("d")],
+      currentIndex: 0,
+      shuffle: true,
+      played: ["a", "c"],
+    };
+    const after = queueReducer(sq, { type: "next", roll: 0, commitId: "c" });
+    expect(after.items[after.currentIndex].id).toBe("b"); // pool [b,d], roll 0
+  });
+  it("falls back to the pool when the committed track left the queue", () => {
+    const after = queueReducer(four(), { type: "next", roll: 0, commitId: "zz" });
+    expect(after.items[after.currentIndex].id).toBe("b");
+  });
+  it("falls back when the committed id is somehow the current track", () => {
+    const after = queueReducer(four(), { type: "next", roll: 0, commitId: "a" });
+    expect(after.items[after.currentIndex].id).toBe("b");
+  });
+  it("committed pick serves the last unplayed slot without a pass reset", () => {
+    const sq: QueueState = {
+      items: [vod("a"), vod("b"), vod("c"), vod("d")],
+      currentIndex: 0,
+      shuffle: true,
+      played: ["b", "c"],
+    };
+    const after = queueReducer(sq, {
+      type: "next",
+      freshPass: true,
+      roll: 0,
+      commitId: "d",
+    });
+    expect(after.currentIndex).toBe(3);
+    expect(after.played).toEqual(["b", "c", "a"]); // no reset — commit served
+  });
+});

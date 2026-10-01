@@ -37,6 +37,11 @@ tauri-plugin-single-instance = "2"
 # platform grows a dependency it cannot use. Bridge: src/smtc.rs.
 [target.'cfg(windows)'.dependencies]
 playwire = "1.0"
+# Below-normal priority for background prefetch yt-dlp children (ytdlp.rs).
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

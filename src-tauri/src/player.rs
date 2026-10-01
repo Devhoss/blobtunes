@@ -424,7 +424,7 @@ fn spawn_resolver(tx: &Sender<PlayerCmd>, gen: u64, url: String) {
 /// MPV_ERROR_COMMAND ("seek: raw(-12)") — and `current_url` is the original
 /// YouTube URL, which a direct loadfile can't play (the ytdl hook is OFF;
 /// mpv would try to decode the watch page → "Failed to recognize file
-/// format"). So go back through the resolver: the 20-min resolve cache
+/// format"). So go back through the resolver: the 60-min resolve cache
 /// returns the still-valid googlevideo URL instantly, and past the TTL a
 /// fresh resolve is exactly what an expired URL needs anyway.
 fn reload_current(
